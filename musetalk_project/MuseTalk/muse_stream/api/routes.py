@@ -93,6 +93,7 @@ async def status(request: Request) -> dict[str, Any]:
             args.interrupt_resume_mode if args else "restart"
         ),
         "max_prefetch_seconds": args.max_prefetch_seconds if args else 6,
+        "idle_prebuffer_frames": getattr(args, "idle_prebuffer_frames", 8),
         "input_mode": args.input_mode if args else "file",
         "context_left_ms": (
             args.stream_context_left_ms if args else 0
@@ -110,6 +111,7 @@ async def status(request: Request) -> dict[str, Any]:
         "feature_window_mode": (
             args.feature_window_mode if args else "legacy"
         ),
+        "face_stability_strength": getattr(args, "face_stability_strength", 0.0),
         "feature_window_left": args.feature_window_left if args else 4,
         "feature_window_right": args.feature_window_right if args else 6,
         "stream_connected": state.stream_input.connected,

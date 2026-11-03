@@ -120,6 +120,9 @@ def load_config(config_name: str) -> LoadedConfig:
     feature_window_right = int(
         inference_cfg.get("feature_window_right", 6)
     )
+    face_stability_strength = float(inference_cfg.get("face_stability_strength", 0.0))
+    if not 0.0 <= face_stability_strength <= 0.35:
+        raise ValueError("inference.face_stability_strength must be between 0 and 0.35")
     process_existing = bool(live_cfg.get("process_existing", True))
     input_mode = str(live_cfg.get("input_mode", "file")).lower()
     audio_dir_value = str(live_cfg.get("audio_dir", "audio"))
@@ -292,6 +295,7 @@ def load_config(config_name: str) -> LoadedConfig:
         feature_window_mode=feature_window_mode,
         feature_window_left=feature_window_left,
         feature_window_right=feature_window_right,
+        face_stability_strength=face_stability_strength,
         audio_dir=str(audio_dir),
         idle_timeout_seconds=idle_timeout_seconds,
         interrupt_wait_seconds=interrupt_wait_seconds,

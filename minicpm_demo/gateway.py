@@ -1453,7 +1453,7 @@ async def avatar_live_ws(ws: WebSocket):
     if ws.url.query:
         target += f"?{ws.url.query}"
     try:
-        upstream = await websockets.connect(target, open_timeout=5, max_size=None)
+        upstream = await websockets.connect(target, open_timeout=5, max_size=None, compression=None)
     except Exception as exc:
         logger.warning("avatar live proxy: connect %s failed: %s", target, exc)
         await ws.send_json({"type": "error", "message": "数字人服务不可用"})
@@ -1759,6 +1759,7 @@ def main():
             host=args.host,
             port=port,
             ws_max_size=128 * 1024 * 1024,
+            ws_per_message_deflate=False,
             **ssl_kwargs,
         )
         internal_config = uvicorn.Config(

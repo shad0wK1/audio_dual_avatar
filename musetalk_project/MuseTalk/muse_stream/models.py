@@ -38,12 +38,16 @@ def model_paths(args: Namespace) -> tuple[str, str]:
 
 def build_runtime(args: Namespace) -> Runtime:
     import torch
+    import cv2
     from transformers import WhisperModel
 
     from musetalk.utils.audio_processor import AudioProcessor
     from musetalk.utils.face_parsing import FaceParsing
     from musetalk.utils.utils import load_all_model
 
+    torch.set_num_threads(4)
+    cv2.setNumThreads(2)
+    torch.backends.cudnn.benchmark = False
     torch.cuda.set_device(args.gpu_id)
     device = torch.device(
         f"cuda:{args.gpu_id}" if torch.cuda.is_available() else "cpu"
@@ -94,6 +98,8 @@ def build_runtime(args: Namespace) -> Runtime:
 def warmup(runtime: Runtime, batch_size: int) -> None:
     """Warm up CUDA kernels so the first streamed batch is not delayed."""
     import torch
+    import tempfile
+    import wave
 
     log(f"warming up UNet / VAE / Whisper (batch={batch_size})")
     with torch.no_grad():
@@ -117,6 +123,19 @@ def warmup(runtime: Runtime, batch_size: int) -> None:
             (1, 80, 3000), device=runtime.device, dtype=runtime.weight_dtype
         )
         runtime.whisper.encoder(mel, output_hidden_states=True)
+
+        # Exercise the file/CPU extractor too; warming only a synthetic mel
+        # leaves its first real reply paying library initialization costs.
+        with tempfile.TemporaryDirectory(prefix="avatar-audio-warmup-") as folder:
+            wav_path = str(Path(folder) / "silence.wav")
+            with wave.open(wav_path, "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(16000)
+                wav.writeframes(bytes(32000))
+            runtime.audio_processor.get_audio_feature(
+                wav_path, weight_dtype=runtime.weight_dtype,
+            )
 
     if torch.cuda.is_available():
         torch.cuda.synchronize(runtime.device)

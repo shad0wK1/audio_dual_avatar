@@ -44,6 +44,7 @@ class LiveStreamSession:
         default_format = os.environ.get("AVATAR_STREAM_FORMAT", "h264").lower()
         requested_format = (
             websocket.query_params.get("video_codec", "")
+            or websocket.query_params.get("codec", "")
             or default_format
         ).lower()
         self.stream_format = (
@@ -172,6 +173,7 @@ class LiveStreamSession:
                 {
                     "type": "meta",
                     "fps": state.model.fps,
+                    "codec": "h264" if self.stream_format in ("h264", "h264_annexb") else self.stream_format,
                     "prebuffer": state.model.prebuffer,
                     "max_prefetch_seconds": args.max_prefetch_seconds,
                     "idle_timeout_seconds": args.idle_timeout_seconds,
@@ -190,7 +192,7 @@ class LiveStreamSession:
                     ),
                     "codec_string": os.environ.get(
                         "AVATAR_H264_CODEC_STRING",
-                        "avc1.4D4028",
+                        "avc1.640028" if os.environ.get("AVATAR_H264_BACKEND", "pyav") != "ffmpeg" else "avc1.4D4028",
                     ),
                 }
             )
@@ -223,6 +225,9 @@ class LiveStreamSession:
                 except asyncio.TimeoutError:
                     continue
 
+                # A flush may occur while awaiting the queue. Send its
+                # control before the first IDR from the new generation.
+                await self._send_controls()
                 kind = item[0]
                 if kind == "error":
                     await self.websocket.send_json(
@@ -283,8 +288,11 @@ class LiveStreamSession:
                     pts_us,
                     frame_index,
                     packet,
+                    *generation,
                 ) = item
-                if segment_id in state.pipeline.canceled_ids:
+                if segment_id in state.pipeline.canceled_ids or (
+                    generation and generation[0] != state.pipeline.flush_seq
+                ):
                     continue
                 while (
                     self.last_sent_frame - self.acked_frame
@@ -310,6 +318,7 @@ class LiveStreamSession:
                     state.service.exit_requested
                     or self.viewer_gone.is_set()
                     or segment_id in state.pipeline.canceled_ids
+                    or (generation and generation[0] != state.pipeline.flush_seq)
                 ):
                     continue
                 await self.websocket.send_bytes(packet)
@@ -355,11 +364,27 @@ class LiveStreamSession:
         for frame_queue in (self.raw_queue, self.network_queue):
             if frame_queue is None:
                 continue
+            kept = []
             try:
                 while True:
-                    frame_queue.get_nowait()
+                    item = frame_queue.get_nowait()
+                    if item[0] in ("raw", "frame"):
+                        if len(item) > 6 and item[-1] == self.state.pipeline.flush_seq:
+                            kept.append(item)
+                    elif item[0] == "segment":
+                        if item[1].id not in self.state.pipeline.canceled_ids:
+                            kept.append(item)
+                    elif item[0] == "segment_end":
+                        if item[1] not in self.state.pipeline.canceled_ids:
+                            kept.append(item)
+                    elif item[0] == "error":
+                        kept.append(item)
             except asyncio.QueueEmpty:
                 pass
+            # New-generation IDRs may already be queued when the control
+            # loop notices a flush. Keep them so decoder/credit cannot deadlock.
+            for item in kept:
+                frame_queue.put_nowait(item)
 
     async def _send_controls(self) -> None:
         state = self.state

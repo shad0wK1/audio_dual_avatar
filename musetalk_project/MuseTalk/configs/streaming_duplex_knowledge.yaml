@@ -8,9 +8,9 @@ server:
   gpu_id: 0
   fps: 24
   batch_size: 28
-  prebuffer: 32
+  prebuffer: 16
   queue_size: 48
-  jpeg_quality: 88
+  jpeg_quality: 65
 
 models:
   version: v15
@@ -20,7 +20,7 @@ models:
   unet_config: ./models/musetalkV15/musetalk.json
 
 avatar:
-  id: knowledge_host_720p
+  id: knowledge_host_720p_stable_v1
   video_path: data/video/knowledge_host_720p.mp4
   bbox_shift: 0
   preparation: auto
@@ -32,9 +32,10 @@ avatar:
 inference:
   audio_padding_length_left: 2
   audio_padding_length_right: 2
-  feature_window_mode: legacy
+  feature_window_mode: centered
   feature_window_left: 4
   feature_window_right: 6
+  face_stability_strength: 0.22
   enable_vad: false
   silence_threshold_dbfs: -45
   silence_merge_gap_frames: 3
@@ -47,8 +48,8 @@ live:
   interrupt_resume_mode: restart
   poll_interval_seconds: 0.5
   file_stable_seconds: 0.5
-  max_prefetch_seconds: 4
-  idle_prebuffer_frames: 8
+  max_prefetch_seconds: 1
+  idle_prebuffer_frames: 16
   hold_max_frames: 12
   prebuffer_answer_start_only: true
   process_existing: false

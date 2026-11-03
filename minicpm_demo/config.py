@@ -74,7 +74,7 @@ class AudioConfig(BaseModel):
         description="默认参考音频路径（TTS 声音克隆，相对于 minicpmo45_service/）",
     )
     avatar_ref_audio_path: Optional[str] = Field(
-        default="assets/ref_audio/ref_avatar_default.wav",
+        default="assets/ref_audio/s1_6jogxFovm.wav",
         description=(
             "纯音频数字人 /avatar 页面使用的参考音频路径；"
             "不影响 /omni 和全局 TTS 默认音色"

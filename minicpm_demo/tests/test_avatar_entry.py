@@ -47,7 +47,7 @@ def test_default_avatar_and_poster_use_knowledge_video():
             / "streaming_duplex_knowledge.yaml"
         ).read_text()
     )
-    assert config["avatar"]["id"] == "knowledge_host_720p"
+    assert config["avatar"]["id"] == "knowledge_host_720p_stable_v1"
     assert config["avatar"]["video_path"] == "data/video/knowledge_host_720p.mp4"
     launcher = (root / "start_avatar.sh").read_text()
     assert (
@@ -97,7 +97,7 @@ def test_avatar_only_voice_reference_is_wired_without_changing_omni_default():
     )
     assert (
         config["audio"]["avatar_ref_audio_path"]
-        == "assets/ref_audio/ref_avatar_default.wav"
+        == "assets/ref_audio/s1_6jogxFovm.wav"
     )
     assert (DEMO_ROOT / config["audio"]["avatar_ref_audio_path"]).is_file()
 

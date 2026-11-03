@@ -8,7 +8,7 @@ import traceback
 
 from .audio.ingest import DirectoryAudioIngestor
 from .log import log
-from .models import build_avatar, build_runtime
+from .models import build_avatar, build_runtime, warmup
 from .state import AppState
 
 
@@ -43,6 +43,11 @@ def initialize(state: AppState) -> None:
             runtime,
             state.model.avatar_id,
         )
+        # Face detection enables autotuning during preparation. Restore the
+        # inference policy and warm up again after all preparation imports.
+        import torch
+        torch.backends.cudnn.benchmark = False
+        warmup(runtime, args.batch_size)
         if state.model.avatar.frame_list_cycle:
             frame = state.model.avatar.frame_list_cycle[0]
             state.model.height, state.model.width = frame.shape[:2]

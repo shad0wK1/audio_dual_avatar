@@ -12,7 +12,7 @@
 MINICPM_CUDA_VISIBLE_DEVICES=0
 MUSETALK_CUDA_VISIBLE_DEVICES=1
 
-# Keep the local 480x864 output size. Set a positive width only when a lower
+# Keep the native avatar output size. Set a positive width only when a lower
 # bandwidth stream is explicitly desired.
 AVATAR_STREAM_FORMAT=h264
 AVATAR_STREAM_MAX_WIDTH=0
@@ -22,11 +22,13 @@ AVATAR_ENCODE_THREADS=4
 AVATAR_H264_BITRATE=2M
 AVATAR_H264_MAXRATE=3M
 AVATAR_H264_BUFSIZE=2M
-AVATAR_H264_GOP=120
-AVATAR_H264_PRESET=ultrafast
-AVATAR_H264_PROFILE=main
+AVATAR_H264_GOP=48
+AVATAR_H264_BACKEND=pyav
+AVATAR_H264_CRF=20
+AVATAR_H264_PRESET=veryfast
+AVATAR_H264_PROFILE=high
 AVATAR_H264_LEVEL=4.0
-AVATAR_H264_CODEC_STRING=avc1.4D4028
+AVATAR_H264_CODEC_STRING=avc1.640028
 
 # The 720p knowledge-sharing avatar is the default. To use the original avatar
 # cache as a fallback, uncomment this override.

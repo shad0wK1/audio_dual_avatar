@@ -85,7 +85,8 @@ class MiniCPMBridgeSession(StreamAudioSession):
                 except WebSocketDisconnect:
                     pass
                 finally:
-                    await self._end_turn("disconnect")
+                    # Discard a disconnected conversation instead of replaying its tail.
+                    self._barge_in("disconnect")
                     state.stream_input.connected = False
                     log(
                         "minicpm bridge disconnected: "

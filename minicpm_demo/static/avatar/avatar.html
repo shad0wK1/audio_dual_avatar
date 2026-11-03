@@ -6,8 +6,8 @@
     <meta name="theme-color" content="#11141e">
     <title>实时交互数字人</title>
     <link rel="stylesheet" href="/static/avatar/avatar.css?v=prompt2">
-    <link rel="modulepreload" href="/static/avatar/avatar-app.js?v=h2641">
-    <link rel="modulepreload" href="/static/avatar/avatar-player.js?v=h2641">
+    <link rel="modulepreload" href="/static/avatar/avatar-app.js?v=stutter2">
+    <link rel="modulepreload" href="/static/avatar/avatar-player.js?v=stutter2">
 </head>
 <body>
     <svg class="icon-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
@@ -54,7 +54,7 @@
             <section class="panel prompt-panel" aria-labelledby="promptTitle">
                 <div class="panel-heading"><div><span class="panel-icon"><svg><use href="#i-prompt"/></svg></span><h2 id="promptTitle">系统提示词</h2></div><button class="text-button" id="btnResetPrompt">恢复默认</button></div>
                 <label class="sr-only" for="systemPrompt">系统提示词</label>
-                <textarea id="systemPrompt" rows="4" spellcheck="false" placeholder="描述数字人的角色、语气和回答方式…">你是一名专业、亲切的中文知识传播助手，面向普通大众进行准确、易懂、有温度的知识讲解。你的目标是帮助用户理解概念、建立知识框架，并能在生活或学习中应用。回答时：先准确理解问题，必要时用一句话澄清；默认使用自然、简洁的中文口语，先给核心结论，再分点解释，必要时使用类比或例子；根据用户背景控制专业术语密度，首次出现时进行解释；涉及事实、数据、研究或出处时说明确定性，不编造，不确定就明确说明并给出可靠的核查方向；对争议话题保持中立，呈现主要观点和依据；语音回答避免冗长和复杂格式，一般控制在几句话到一小段，用户要求时再深入展开；合适时可以给一个延伸问题或可执行的小建议，但不要机械追问。始终尊重用户，不传播歧视、仇恨、违法或危险内容。</textarea>
+                <textarea id="systemPrompt" rows="4" spellcheck="false" placeholder="描述数字人的角色、语气和回答方式…">你叫阿萍，是一名专业、亲切的中文知识传播助手，面向普通大众进行准确、易懂、有温度的知识讲解。你的目标是帮助用户理解概念、建立知识框架，并能在生活或学习中应用。回答时：先准确理解问题，必要时用一句话澄清；默认使用自然、简洁的中文口语，先给核心结论，再分点解释，必要时使用类比或例子；根据用户背景控制专业术语密度，首次出现时进行解释；涉及事实、数据、研究或出处时说明确定性，不编造，不确定就明确说明并给出可靠的核查方向；对争议话题保持中立，呈现主要观点和依据；语音回答避免冗长和复杂格式，一般控制在几句话到一小段，用户要求时再深入展开；合适时可以给一个延伸问题或可执行的小建议，但不要机械追问。始终尊重用户，不传播歧视、仇恨、违法或危险内容。</textarea>
                 <div class="prompt-footer"><span>为数字人设定角色与表达方式</span><span id="promptCount">0 字</span></div>
             </section>
             <section class="panel audio-panel" aria-labelledby="audioTitle">
@@ -75,6 +75,6 @@
             </section>
         </aside>
     </main>
-    <script type="module" src="/static/avatar/avatar-app.js?v=h2641"></script>
+    <script type="module" src="/static/avatar/avatar-app.js?v=stutter2"></script>
 </body>
 </html>

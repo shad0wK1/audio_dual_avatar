@@ -26,8 +26,9 @@ from ..protocol import (
     pack_frame,
 )
 from ..state import AppState
-from .h264 import EncodedH264Frame, H264Encoder
+from .h264 import EncodedH264Frame, FFmpegH264Encoder as H264Encoder
 from .pipeline import InferencePipeline
+from .stability import FaceStabilizer, overlap_length
 
 # Raw-queue marker for "repeat the previous composite frame". It never goes
 # on the wire: the encode worker sends it as FRAME_SILENT.
@@ -93,6 +94,7 @@ def live_infer_worker(
     assert avatar is not None
     segments = SegmentManager(state)
     pipeline = InferencePipeline(state)
+    stabilizer = FaceStabilizer(getattr(args, "face_stability_strength", 0.0))
     next_frame = 0
     pending_extra: dict[int, tuple[str, np.ndarray]] = {}
     # Last segment that finished generating while an answer is still open.
@@ -103,6 +105,8 @@ def live_infer_worker(
 
     def emit_idle_frame() -> bool:
         nonlocal next_frame
+        frame_flush_seq = state.pipeline.flush_seq
+        stabilizer.reset()
         frame = avatar.frame_list_cycle[
             next_frame % len(avatar.frame_list_cycle)
         ]
@@ -116,6 +120,7 @@ def live_infer_worker(
                 frame_pts_us(next_frame, state.model.fps),
                 next_frame,
                 frame,
+                frame_flush_seq,
             ),
             stop,
         ):
@@ -126,6 +131,7 @@ def live_infer_worker(
 
     def emit_gap_frame() -> bool:
         nonlocal next_frame, last_media, hold_run
+        frame_flush_seq = state.pipeline.flush_seq
         if (
             last_media is not None
             and not last_media.is_final
@@ -143,6 +149,7 @@ def live_infer_worker(
                     frame_pts_us(next_frame, state.model.fps),
                     next_frame,
                     None,
+                    frame_flush_seq,
                 ),
                 stop,
             ):
@@ -176,6 +183,8 @@ def live_infer_worker(
             if reset_frame >= 0:
                 last_media = None
                 hold_run = 0
+                pending_extra.clear()
+                stabilizer.reset()
             if reset_frame >= 0 and reset_frame != next_frame:
                 next_frame = reset_frame
 
@@ -219,7 +228,7 @@ def live_infer_worker(
             hold_run = 0
 
             segment.global_start_frame = next_frame
-            overlap = min(segment.extra_frames, segment.total_frames)
+            overlap = overlap_length(pending_extra, segment.global_start_frame, segment.total_frames)
             for frame_index in list(pending_extra):
                 if (
                     frame_index < segment.global_start_frame
@@ -233,6 +242,7 @@ def live_infer_worker(
                 )
             completed = False
             canceled = False
+            segment_flush_seq = state.pipeline.flush_seq
             with state.pipeline.lock:
                 state.pipeline.generating += 1
             try:
@@ -291,6 +301,10 @@ def live_infer_worker(
                                 frame,
                                 alpha,
                             )
+                    if frame_kind == "generated":
+                        emit_frame = stabilizer.process(frame_index, emit_frame)
+                    else:
+                        stabilizer.reset()
                     if not put_blocking(
                         raw_queue,
                         loop,
@@ -305,6 +319,7 @@ def live_infer_worker(
                             frame_pts_us(frame_index, state.model.fps),
                             frame_index,
                             emit_frame,
+                            segment_flush_seq,
                         ),
                         stop,
                     ):
@@ -339,6 +354,77 @@ def live_infer_worker(
         )
 
 
+
+def live_h264_encode_worker(state, raw_queue, network_queue, loop, stop):
+    """Encode in timeline order so inter-frame references stay valid."""
+    from .h264 import H264Encoder
+
+    args = state.args
+    pipeline = InferencePipeline(state)
+    encoder = None
+    previous_image = None
+    count = 0
+    started = time.monotonic()
+    log("live encoder started: H.264 native-resolution zerolatency CRF="
+        + os.environ.get("AVATAR_H264_CRF", "20"))
+    try:
+        while not stop.is_set():
+            item = get_blocking(raw_queue, loop, stop)
+            if item is None:
+                return
+            kind = item[0]
+            if kind in ("segment", "segment_end", "error"):
+                if not put_blocking(network_queue, loop, item, stop):
+                    return
+                if kind == "error":
+                    return
+                continue
+            if kind != "raw":
+                continue
+            _, frame_kind, segment_id, pts_us, frame_index, frame, *generation = item
+            with state.pipeline.lock:
+                if segment_id in state.pipeline.canceled_ids:
+                    continue
+                flush = state.pipeline.flush_seq
+            if generation and generation[0] != flush:
+                continue
+            if frame_kind == FRAME_HOLD:
+                frame_kind = FRAME_SILENT
+                image = previous_image
+                if image is None:
+                    cycle = state.model.avatar.frame_list_cycle
+                    image = cycle[frame_index % len(cycle)]
+            elif frame_kind == FRAME_GENERATED:
+                image = pipeline.blend_frame(frame_index, frame)
+            else:
+                image = frame
+            width = int(os.environ.get("AVATAR_STREAM_MAX_WIDTH", "0"))
+            width -= width % 2
+            if width > 0 and image.shape[1] > width:
+                height = round(image.shape[0] * width / image.shape[1])
+                height -= height % 2
+                image = cv2.resize(image, (width, height), interpolation=cv2.INTER_AREA)
+            if encoder is None:
+                encoder = H264Encoder(image.shape[1], image.shape[0], state.model.fps)
+            payload = encoder.encode(image, index=frame_index, segment=segment_id, flush=flush)
+            with state.pipeline.lock:
+                if segment_id in state.pipeline.canceled_ids or flush != state.pipeline.flush_seq:
+                    continue
+            previous_image = image
+            packet = pack_h264_frame(frame_kind, segment_id, pts_us, frame_index,
+                                     payload[5:], keyframe=bool(payload[4]))
+            if not put_blocking(network_queue, loop,
+                ("frame", frame_kind, segment_id, pts_us, frame_index, packet, flush), stop):
+                return
+            count += 1
+            if count % 500 == 0:
+                log(f"H.264 encoded {count} frames at={time.monotonic()-started:.3f}s "
+                    f"network_queue={network_queue.qsize()}")
+    except Exception:
+        log(traceback.format_exc())
+        put_blocking(network_queue, loop, ("error", traceback.format_exc()), stop)
+
+
 def live_encode_worker(
     state: AppState,
     raw_queue: asyncio.Queue,
@@ -347,6 +433,10 @@ def live_encode_worker(
     stop: threading.Event,
     stream_format: str | None = None,
 ) -> None:
+    selected_format = (stream_format or os.environ.get("AVATAR_STREAM_FORMAT", "h264")).lower()
+    if selected_format in ("h264", "h264_annexb") and os.environ.get("AVATAR_H264_BACKEND", "pyav") != "ffmpeg":
+        live_h264_encode_worker(state, raw_queue, network_queue, loop, stop)
+        return
     args = state.args
     assert args is not None
     pipeline = InferencePipeline(state)
@@ -504,6 +594,7 @@ def live_encode_worker(
                         pts_us,
                         frame_index,
                         packet,
+                        frame_flush_seq,
                     ),
                     stop,
                 ):
@@ -588,10 +679,11 @@ def live_encode_worker(
                 return
             with state.pipeline.lock:
                 current_flush_seq = state.pipeline.flush_seq
-            if use_h264 and current_flush_seq != encoder_flush_seq:
-                assert h264_encoder is not None
-                h264_encoder.close()
-                h264_encoder = create_h264_encoder()
+            if current_flush_seq != encoder_flush_seq:
+                if use_h264:
+                    assert h264_encoder is not None
+                    h264_encoder.close()
+                    h264_encoder = create_h264_encoder()
                 encoder_flush_seq = current_flush_seq
                 log(
                     "H.264 encoder restarted for flush "
@@ -610,7 +702,9 @@ def live_encode_worker(
             if kind != "raw":
                 continue
 
-            _, frame_kind, segment_id, pts_us, frame_index, frame = item
+            _, frame_kind, segment_id, pts_us, frame_index, frame, *generation = item
+            if generation and generation[0] != current_flush_seq:
+                continue
             if frame_kind == FRAME_HOLD:
                 frame_kind = FRAME_SILENT
                 if use_h264:

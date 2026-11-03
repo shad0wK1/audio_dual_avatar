@@ -100,7 +100,7 @@ def _ffmpeg_binary() -> str:
     raise FileNotFoundError("ffmpeg executable not found for H.264 encoder")
 
 
-class H264Encoder:
+class FFmpegH264Encoder:
     """Stateful ffmpeg/libx264 encoder with ordered access-unit completion."""
 
     def __init__(
@@ -310,3 +310,60 @@ class H264Encoder:
             if not future.done():
                 future.set_exception(RuntimeError(message))
         self.on_error(message)
+
+
+"""One H.264 access unit per frame, with no delayed/B frames."""
+
+from fractions import Fraction
+import os
+
+import av
+
+
+H264_PREFIX = b"H264"
+
+
+class H264Encoder:
+    def __init__(self, width: int, height: int, fps: int):
+        self.width, self.height, self.fps = width, height, fps
+        self.codec = None
+        self.last_index = None
+        self.last_segment = None
+        self.last_flush = None
+
+    def encode(self, image, *, index: int, segment: int, flush: int):
+        # A fresh IDR includes SPS/PPS. Never reference a canceled frame or a
+        # prior timeline after an interrupt or reconnect. Normal segments share references.
+        reset = (
+            self.codec is None
+            or flush != self.last_flush
+            or index != self.last_index + 1
+        )
+        if reset:
+            codec = av.CodecContext.create("libx264", "w")
+            codec.width, codec.height = self.width, self.height
+            codec.pix_fmt = "yuv420p"
+            codec.time_base = Fraction(1, self.fps)
+            codec.framerate = Fraction(self.fps, 1)
+            codec.thread_count = 4
+            codec.options = {
+                "preset": os.environ.get("AVATAR_H264_PRESET", "veryfast"),
+                "tune": "zerolatency",
+                "crf": os.environ.get("AVATAR_H264_CRF", "20"),
+                "profile": "high",
+                "level": "4.0",
+                "x264-params": (
+                    f"keyint={max(1, int(os.environ.get('AVATAR_H264_GOP', self.fps * 2)))}:min-keyint=1:scenecut=0:bframes=0:"
+                    "repeat-headers=1:aud=1:vbv-maxrate=3000:vbv-bufsize=1500"
+                ),
+            }
+            codec.open()
+            self.codec = codec
+        frame = av.VideoFrame.from_ndarray(image, format="bgr24")
+        frame.pts = index
+        packets = self.codec.encode(frame)
+        if len(packets) != 1:
+            raise RuntimeError(f"Low-latency H.264 must output one packet per frame: {len(packets)}")
+        packet = packets[0]
+        self.last_index, self.last_segment, self.last_flush = index, segment, flush
+        return H264_PREFIX + bytes([int(packet.is_keyframe)]) + bytes(packet)

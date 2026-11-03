@@ -1,17 +1,15 @@
 /**
  * AvatarPlayer — MuseTalk /ws/live client for the omni page in avatar mode.
  *
- * H.264 mode receives one Annex-B access unit per "MTH1" message and decodes
- * it with WebCodecs. WebP/JPEG fallback keeps the original per-frame "MTF1"
- * messages decoded with createImageBitmap. Each `segment` message points at a
- * WAV scheduled on the AudioContext; the audio clock picks the frame to draw,
- * and ACKs tell the server how far playback has got.
+ * Ported from MuseTalk web/app.js. Each binary message is one encoded frame
+ * behind a 24-byte header (magic "MTF1", kind, segment id, pts_us, frame
+ * index). Each `segment` message points at a WAV that is scheduled on the
+ * AudioContext at the segment's pts; the audio clock picks the frame to
+ * draw, and ACKs tell the server how far playback has got.
  */
 
 const FRAME_MAGIC = 0x4d544631;
 const H264_FRAME_MAGIC = 0x4d544831;
-const H264_CODEC = 'avc1.4D4028';
-const FRAME_FLAG_KEYFRAME = 1;
 const IDLE_SEGMENT = 0xffffffff;
 const FRAME_IDLE = 0;
 const FRAME_SILENT = 2;
@@ -20,6 +18,11 @@ export const INTERRUPT_FLUSH_TIMEOUT_MS = 2500;
 // Frames of a segment needed before its audio may start (server meta.prebuffer
 // is the answer-start delay, already applied on the server timeline).
 const CLIENT_PREBUFFER_FRAMES = 8;
+const CONTINUATION_PREBUFFER_FRAMES = 2;
+// The first server window is 20/24 s; allow its 4/24 s remainder
+// plus a short jitter margin before switching to 1 s continuations.
+const AUDIO_START_BUFFER_S = 0.30;
+const AUDIO_CONTINUATION_LEAD_S = 0.012;
 // Audio starting later than its pts by more than this shifts the video clock.
 const TIMELINE_SLACK_S = 0.01;
 
@@ -50,21 +53,24 @@ export class AvatarPlayer {
         this.prebuffer = 8;
         this.maxPrefetch = 4;
         this.closed = false;
+        this.videoCodec = 'webp';
+        this._codecString = 'avc1.640028';
+        this._videoDecoder = null;
+        this._decodePending = new Map();
+        this._decodeSequence = 0;
+        this._decodeGeneration = 0;
         this.frames = new Map();
         this._raf = 0;
         this._retryTimer = null;
         this._subtitleTimers = [];
         this._speaking = null;
+        this._responseActive = false;
+        this._playbackState = null;
         this.interruptTimeoutMs = interruptTimeoutMs;
         this.onInterruptAcknowledged = null;
         this.onInterruptTimeout = null;
         this._interruptTimer = null;
         this._interruptToken = 0;
-        this.videoCodec = 'webp';
-        this.videoDecoder = null;
-        this._decoderGeneration = 0;
-        this._decoderMeta = new Map();
-        this._waitingKeyframe = false;
         this._resetTimeline();
     }
 
@@ -79,11 +85,24 @@ export class AvatarPlayer {
             || segment.startAt + segment.duration > this.ctx.currentTime);
     }
 
+    setResponseActive(active) {
+        this._responseActive = Boolean(active);
+    }
+
     /**
      * Unlock audio and connect. Call from a user gesture (the Start click).
      * @param {(ctx: AudioContext) => void} [applySink] output device hook
      */
     async start(applySink) {
+        this.videoCodec = 'webp';
+        if (typeof VideoDecoder !== 'undefined') {
+            try {
+                const support = await VideoDecoder.isConfigSupported({
+                    codec: this._codecString, optimizeForLatency: true,
+                });
+                if (support.supported) this.videoCodec = 'h264';
+            } catch { /* use the image transport */ }
+        }
         if (!this.ctx) {
             this.ctx = new AudioContext();
             this.gain = this.ctx.createGain();
@@ -93,25 +112,25 @@ export class AvatarPlayer {
             }
         }
         if (this.ctx.state === 'suspended') await this.ctx.resume();
-        await this._selectVideoCodec();
         this._connect();
         if (!this._raf) this._raf = requestAnimationFrame(() => this._render());
     }
 
     close() {
         this.closed = true;
+        this._resetVideoDecoder();
         this._clearInterruptWatchdog();
         clearTimeout(this._retryTimer);
         if (this._raf) cancelAnimationFrame(this._raf);
         this._raf = 0;
         this.clearSubtitle();
         if (this.ws) this.ws.close();
-        this._closeVideoDecoder();
         this._stopAudio();
     }
 
     /** Stop queued playback immediately; the next forced-listen chunk flushes the server. */
     interrupt() {
+        this._resetVideoDecoder();
         this._discardUntilFlush = true;
         this._dropFromCurrent();
         this.clearSubtitle();
@@ -162,30 +181,11 @@ export class AvatarPlayer {
 
     // ---- connection ----
 
-    async _selectVideoCodec() {
-        if (typeof VideoDecoder === 'undefined') {
-            this.videoCodec = 'webp';
-            return;
-        }
-        try {
-            const support = await VideoDecoder.isConfigSupported({
-                codec: H264_CODEC,
-                optimizeForLatency: true,
-                avc: { format: 'annexb' },
-            });
-            this.videoCodec = support.supported ? 'h264' : 'webp';
-        } catch {
-            this.videoCodec = 'webp';
-        }
-    }
-
     _connect() {
         if (this.closed || (this.ws && this.ws.readyState <= WebSocket.OPEN)) return;
         const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
         const codecQuery = encodeURIComponent(this.videoCodec);
-        const ws = new WebSocket(
-            `${proto}//${location.host}${this.base}/ws/live?video_codec=${codecQuery}`,
-        );
+        const ws = new WebSocket(`${proto}//${location.host}${this.base}/ws/live?video_codec=${codecQuery}`);
         ws.binaryType = 'arraybuffer';
         this.ws = ws;
         this._setStatus('connecting', '数字人连接中…');
@@ -201,7 +201,6 @@ export class AvatarPlayer {
         };
         ws.onclose = () => {
             if (this.ws === ws) this.ws = null;
-            this._closeVideoDecoder();
             this._stopAudio();
             if (this.closed) return;
             if (this.statusEl && this.statusEl.dataset.state !== 'error') {
@@ -215,18 +214,13 @@ export class AvatarPlayer {
     _onControl(msg) {
         switch (msg.type) {
         case 'meta':
+            this._codecString = msg.codec_string || this._codecString;
             this.fps = msg.fps || 24;
             this.prebuffer = msg.prebuffer || 8;
             this.maxPrefetch = msg.max_prefetch_seconds || 4;
-            this.videoCodec = msg.video_codec || this.videoCodec;
             if (msg.width && msg.height) {
                 this.canvas.width = msg.width;
                 this.canvas.height = msg.height;
-            }
-            if (this.videoCodec === 'h264') {
-                this._configureVideoDecoder(msg);
-            } else {
-                this._closeVideoDecoder();
             }
             this._speaking = null;
             this._setStatus('idle', '数字人待机');
@@ -250,13 +244,9 @@ export class AvatarPlayer {
             break;
         }
         case 'flush':
+            this._resetVideoDecoder();
             this._discardUntilFlush = false;
             this._clearInterruptWatchdog();
-            if (this.videoDecoder) {
-                try { this.videoDecoder.reset(); } catch { /* reopened below */ }
-                this._decoderMeta.clear();
-                this._waitingKeyframe = true;
-            }
             // Upstream barge-in: drop the current answer, nothing resumes.
             this._dropFromCurrent();
             this.clearSubtitle();
@@ -290,22 +280,31 @@ export class AvatarPlayer {
         if (buffer.byteLength <= 24) return;
         const view = new DataView(buffer);
         const magic = view.getUint32(0);
-        if (magic === H264_FRAME_MAGIC) {
-            this._onH264Frame(view, buffer);
-            return;
-        }
-        if (magic !== FRAME_MAGIC) return;
+        if (magic !== FRAME_MAGIC && magic !== H264_FRAME_MAGIC) return;
         const kind = view.getUint8(4);
         const segmentId = view.getUint32(8);
         const ptsUs = Number(view.getBigInt64(12));
         const index = view.getUint32(20);
         const ws = this.ws;
         const pixels = new Uint8Array(buffer, 24);
+        if (magic === H264_FRAME_MAGIC) {
+            this._decodeH264(pixels, Boolean(view.getUint8(6) & 1),
+                { kind, segmentId, ptsUs, index }, ws);
+            return;
+        }
+        if (pixels[0] === 0x48 && pixels[1] === 0x32
+            && pixels[2] === 0x36 && pixels[3] === 0x34) {
+            this._decodeH264(pixels.subarray(5), Boolean(pixels[4]),
+                { kind, segmentId, ptsUs, index }, ws);
+            return;
+        }
+        const generation = this._decodeGeneration;
         const webp = pixels[0] === 0x52 && pixels[1] === 0x49
             && pixels[8] === 0x57 && pixels[9] === 0x45;
         createImageBitmap(new Blob([pixels], { type: webp ? 'image/webp' : 'image/jpeg' }))
             .then((bitmap) => {
-                if (this.ws !== ws) { bitmap.close(); return; }
+                if (this.ws !== ws || generation !== this._decodeGeneration
+                    || this._discardUntilFlush) { bitmap.close(); return; }
                 const old = this.frames.get(index);
                 if (old) old.bitmap.close();
                 this.frames.set(index, { bitmap, kind, segmentId, ptsUs });
@@ -319,107 +318,81 @@ export class AvatarPlayer {
             .catch(() => {});
     }
 
-    _onH264Frame(view, buffer) {
-        if (this.videoCodec !== 'h264' || !this.videoDecoder) return;
-        const kind = view.getUint8(4);
-        const flags = view.getUint8(6);
-        const segmentId = view.getUint32(8);
-        const ptsUs = Number(view.getBigInt64(12));
-        const index = view.getUint32(20);
-        const keyframe = (flags & FRAME_FLAG_KEYFRAME) !== 0;
-        if (this._waitingKeyframe && !keyframe) return;
-        if (keyframe) this._waitingKeyframe = false;
-        const data = new Uint8Array(buffer, 24);
-        this._decoderMeta.set(ptsUs, { kind, segmentId, ptsUs, index });
-        try {
-            this.videoDecoder.decode(new EncodedVideoChunk({
-                type: keyframe ? 'key' : 'delta',
-                timestamp: ptsUs,
-                data,
-            }));
-        } catch (err) {
-            console.warn('[AvatarPlayer] H.264 decode submit failed:', err);
-            this._fallbackToImages();
-        }
-    }
-
-    _configureVideoDecoder(msg) {
-        this._closeVideoDecoder();
-        if (typeof VideoDecoder === 'undefined') {
-            this._fallbackToImages();
-            return;
-        }
-        const generation = this._decoderGeneration;
-        try {
-            this.videoDecoder = new VideoDecoder({
-                output: (frame) => {
-                    if (generation !== this._decoderGeneration) {
-                        frame.close();
-                        return;
-                    }
-                    this._onDecodedH264(frame);
-                },
-                error: (err) => {
-                    if (generation !== this._decoderGeneration) return;
-                    console.warn('[AvatarPlayer] H.264 decoder failed:', err);
-                    this._fallbackToImages();
-                },
-            });
-            this.videoDecoder.configure({
-                codec: msg.codec_string || H264_CODEC,
-                codedWidth: this.canvas.width,
-                codedHeight: this.canvas.height,
-                optimizeForLatency: true,
-                avc: { format: 'annexb' },
-            });
-            this._waitingKeyframe = true;
-        } catch (err) {
-            console.warn('[AvatarPlayer] H.264 configure failed:', err);
-            this._fallbackToImages();
-        }
-    }
-
-    _onDecodedH264(frame) {
-        const meta = this._decoderMeta.get(frame.timestamp);
-        this._decoderMeta.delete(frame.timestamp);
-        if (!meta) {
-            frame.close();
-            return;
-        }
-        const old = this.frames.get(meta.index);
-        if (old) old.bitmap.close();
-        this.frames.set(meta.index, {
-            bitmap: frame,
-            kind: meta.kind,
-            segmentId: meta.segmentId,
-            ptsUs: meta.ptsUs,
-        });
-        if (meta.segmentId !== IDLE_SEGMENT) {
-            const segment = this.segments.find((item) => item.id === meta.segmentId);
-            if (segment) segment.receivedFrames.add(meta.index);
-        }
-        if (this.lastDrawn >= 0) this._prune(this.lastDrawn);
-        this._scheduleReady();
-    }
-
     _fallbackToImages() {
         if (this.videoCodec !== 'h264') return;
         this.videoCodec = 'webp';
-        this._closeVideoDecoder();
-        if (this.ws) {
-            try { this.ws.close(); } catch { /* reconnect below */ }
-        } else if (!this.closed) {
-            this._connect();
-        }
+        this._resetVideoDecoder();
+        if (this.ws) this.ws.close();
+        else if (!this.closed) this._connect();
     }
 
-    _closeVideoDecoder() {
-        this._decoderGeneration += 1;
-        this._decoderMeta.clear();
-        this._waitingKeyframe = false;
-        if (this.videoDecoder) {
-            try { this.videoDecoder.close(); } catch { /* already closed */ }
-            this.videoDecoder = null;
+    _resetVideoDecoder() {
+        this._decodeGeneration += 1;
+        if (this._videoDecoder) {
+            try { this._videoDecoder.close(); } catch (_) { /* already closed */ }
+        }
+        this._videoDecoder = null;
+        this._decodePending.clear();
+    }
+
+    _decodeH264(data, key, metadata, ws) {
+        if (!this._videoDecoder) {
+            if (!key) return; // IDR carries SPS/PPS and starts a fresh timeline.
+            const generation = this._decodeGeneration;
+            const decoder = new VideoDecoder({
+                output: (frame) => {
+                    const meta = this._decodePending.get(frame.timestamp);
+                    this._decodePending.delete(frame.timestamp);
+                    if (!meta || this.closed || this.ws !== ws
+                        || this._discardUntilFlush || generation !== this._decodeGeneration) {
+                        frame.close(); return;
+                    }
+                    // Release the decoder's limited surface pool immediately.
+                    // Retaining VideoFrames until playback can otherwise stall
+                    // decoding before the next segment has enough buffered frames.
+                    createImageBitmap(frame).then((bitmap) => {
+                        if (this.closed || this.ws !== ws || this._discardUntilFlush
+                            || generation !== this._decodeGeneration) {
+                            bitmap.close(); return;
+                        }
+                        const old = this.frames.get(meta.index);
+                        if (old) old.bitmap.close();
+                        this.frames.set(meta.index, { bitmap, kind: meta.kind,
+                            segmentId: meta.segmentId, ptsUs: meta.ptsUs });
+                        if (meta.segmentId !== IDLE_SEGMENT) {
+                            const segment = this.segments.find((s) => s.id === meta.segmentId);
+                            if (segment) segment.receivedFrames.add(meta.index);
+                        }
+                        if (this.lastDrawn >= 0) this._prune(this.lastDrawn);
+                        this._scheduleReady();
+                    }).catch((error) => {
+                        console.warn('[AvatarPlayer] H.264 frame conversion failed:', error);
+                    }).finally(() => frame.close());
+                },
+                error: (error) => {
+                    console.warn('[AvatarPlayer] H.264 decoder reset:', error);
+                    if (this._videoDecoder === decoder) this._fallbackToImages();
+                },
+            });
+            decoder.configure({ codec: this._codecString, optimizeForLatency: true, avc: { format: 'annexb' } });
+            this._videoDecoder = decoder;
+        }
+        // Bound decode latency and recover at the next IDR rather than replay
+        // stale video after the browser was suspended or the tab fell behind.
+        if (this._videoDecoder.decodeQueueSize >= this.fps * 2) {
+            this._resetVideoDecoder();
+            if (key) this._decodeH264(data, key, metadata, ws);
+            return;
+        }
+        const timestamp = ++this._decodeSequence;
+        this._decodePending.set(timestamp, metadata);
+        try {
+            this._videoDecoder.decode(new EncodedVideoChunk({
+                type: key ? 'key' : 'delta', timestamp, data,
+            }));
+        } catch (error) {
+            console.warn('[AvatarPlayer] H.264 packet rejected:', error);
+            this._resetVideoDecoder();
         }
     }
 
@@ -458,6 +431,7 @@ export class AvatarPlayer {
             const data = await resp.arrayBuffer();
             if (!this.segments.includes(segment)) return;
             segment.audioBuffer = await this.ctx.decodeAudioData(data);
+            segment.duration = segment.audioBuffer.duration;
         } catch (err) {
             // Play the frames silently rather than blocking the video forever.
             console.warn(`[AvatarPlayer] segment ${segment.id} audio failed:`, err);
@@ -467,11 +441,18 @@ export class AvatarPlayer {
     }
 
     _hasPrebuffer(segment) {
-        const needed = Math.min(segment.totalFrames, CLIENT_PREBUFFER_FRAMES);
+        const needed = Math.min(segment.totalFrames, this._isContinuation(segment)
+            ? CONTINUATION_PREBUFFER_FRAMES : CLIENT_PREBUFFER_FRAMES);
         for (let i = 0; i < needed; i += 1) {
             if (!segment.receivedFrames.has(segment.startFrame + i)) return false;
         }
         return true;
+    }
+
+    _isContinuation(segment) {
+        const previous = this.segments[this.scheduleCursor - 1];
+        return Boolean(this.audioScheduleEnd > 0 && previous && previous.startAt !== null
+            && segment.startFrame === previous.startFrame + previous.totalFrames);
     }
 
     /**
@@ -487,7 +468,12 @@ export class AvatarPlayer {
             const audioReady = segment.audioBuffer || segment.audioFailed;
             if (!audioReady || !this._hasPrebuffer(segment)) break;
             const due = this.epoch + segment.startPtsUs / 1e6;
-            const when = Math.max(this.ctx.currentTime + 0.08, due, this.audioScheduleEnd);
+            const continuing = this._isContinuation(segment);
+            // Adjacent samples share one audio clock; do not add a new
+            // start delay or follow a drifting video epoch at every WAV.
+            const when = continuing
+                ? Math.max(this.audioScheduleEnd, this.ctx.currentTime + AUDIO_CONTINUATION_LEAD_S)
+                : Math.max(this.ctx.currentTime + AUDIO_START_BUFFER_S, due, this.audioScheduleEnd);
             if (when - due > TIMELINE_SLACK_S) {
                 this.epoch += when - due;
                 console.log(`[AvatarPlayer] segment ${segment.id}: video timeline shifted +${((when - due) * 1000).toFixed(0)}ms to follow audio`);
@@ -521,7 +507,7 @@ export class AvatarPlayer {
         }
         this._trimSegments();
 
-        const target = Math.floor(Math.max(0, now - this.epoch) * this.fps);
+        const target = this._playbackTarget(now);
         this._drawAt(target);
         this._ack(this.lastDrawn);
 
@@ -530,10 +516,35 @@ export class AvatarPlayer {
             segment && segment.startAt !== null
             && now >= segment.startAt && now < segment.startAt + segment.duration,
         );
-        if (speaking !== this._speaking) {
-            this._speaking = speaking;
-            this._setStatus(speaking ? 'speaking' : 'idle', speaking ? '数字人说话中' : '数字人待机');
+        this._speaking = speaking;
+        const playbackState = speaking ? 'speaking'
+            : this._responseActive || this.hasPendingSpeech ? 'buffering' : 'idle';
+        if (playbackState !== this._playbackState) {
+            this._playbackState = playbackState;
+            this._setStatus(playbackState, speaking ? '数字人说话中'
+                : playbackState === 'buffering' ? '语音缓冲中…' : '数字人待机');
         }
+    }
+
+    _playbackTarget(now) {
+        const segment = this.segments[this.currentIndex];
+        if (segment && segment.startAt !== null && now >= segment.startAt) {
+            const endFrame = segment.startFrame + segment.totalFrames - 1;
+            const elapsed = now - segment.startAt;
+            if (elapsed < segment.duration) {
+                // Each scheduled AudioBuffer is its own immutable clock anchor.
+                // A later segment may move epoch while this audio still plays.
+                return Math.min(endFrame, segment.startFrame
+                    + Math.floor(elapsed * this.fps + 1e-6));
+            }
+            const next = this.segments[this.currentIndex + 1];
+            if (next && next.startFrame === endFrame + 1
+                && (next.startAt === null || now < next.startAt)) {
+                return endFrame;
+            }
+            return Math.max(endFrame, Math.floor(Math.max(0, now - this.epoch) * this.fps));
+        }
+        return Math.floor(Math.max(0, now - this.epoch) * this.fps);
     }
 
     _drawAt(target) {
@@ -596,6 +607,7 @@ export class AvatarPlayer {
     // ---- bookkeeping ----
 
     _dropFromCurrent() {
+        this._responseActive = false;
         for (let i = this.currentIndex; i < this.segments.length; i += 1) {
             const segment = this.segments[i];
             this._stopSource(segment);
@@ -639,9 +651,11 @@ export class AvatarPlayer {
     }
 
     _resetTimeline() {
+        this._responseActive = false;
+        this._playbackState = null;
+        this._resetVideoDecoder();
         this._discardUntilFlush = false;
         this._clearInterruptWatchdog();
-        this._decoderMeta.clear();
         for (const frame of this.frames.values()) frame.bitmap.close();
         this.frames = new Map();
         this.segments = [];

@@ -1,11 +1,11 @@
-import { AvatarPlayer, INTERRUPT_FLUSH_TIMEOUT_MS } from './avatar-player.js?v=h2641';
+import { AvatarPlayer, INTERRUPT_FLUSH_TIMEOUT_MS } from './avatar-player.js?v=stutter2';
 import { SpeechInterruptor } from './speech-interruptor.js?v=prompt2';
 import { RealtimeSession } from '../duplex/lib/realtime-session.js';
 import { arrayBufferToBase64, resampleAudio } from '../duplex/lib/duplex-utils.js';
 
 const $ = (id) => document.getElementById(id);
 const PROMPT_STORAGE_KEY = 'prompt.knowledge.v1';
-const DEFAULT_PROMPT = '你是一名专业、亲切的中文知识传播助手，面向普通大众进行准确、易懂、有温度的知识讲解。'
+const DEFAULT_PROMPT = '你叫阿萍，是一名专业、亲切的中文知识传播助手，面向普通大众进行准确、易懂、有温度的知识讲解。'
     + '你的目标是帮助用户理解概念、建立知识框架，并能在生活或学习中应用。回答时：先准确理解问题，'
     + '必要时用一句话澄清；默认使用自然、简洁的中文口语，先给核心结论，再分点解释，必要时使用类比或例子；'
     + '根据用户背景控制专业术语密度，首次出现时进行解释；涉及事实、数据、研究或出处时说明确定性，不编造，'
@@ -324,6 +324,7 @@ async function start() {
         const hasReply = modelSpeaking || Boolean(player?._speaking) || Boolean(player?.hasPendingSpeech);
         awaitingListen = true;
         modelSpeaking = false;
+        player?.setResponseActive(false);
         armInterruptRecovery(owner);
         if (hasReply) player?.interrupt();
         owner.audioPlayer.stopAll?.();
@@ -344,6 +345,7 @@ async function start() {
     owner.onSpeakStart = (text) => {
         if (awaitingListen) return null;
         modelSpeaking = true;
+        player?.setResponseActive(true);
         userMessage = null;
         player?.setSubtitle(text);
         $('conversationState').textContent = '数字人正在回应';
@@ -352,12 +354,14 @@ async function start() {
     owner.onSpeakUpdate = (element, text) => {
         if (awaitingListen) return;
         modelSpeaking = true;
+        player?.setResponseActive(true);
         if (element) element.textContent = text;
         player?.setSubtitle(text);
         scrollConversation();
     };
     owner.onSpeakEnd = () => {
         modelSpeaking = false;
+        player?.setResponseActive(false);
         player?.endSubtitle();
         $('conversationState').textContent = muted ? '麦克风已静音' : '正在听你说';
     };
@@ -365,6 +369,7 @@ async function start() {
         clearInterruptRecovery();
         awaitingListen = false;
         modelSpeaking = false;
+        player?.setResponseActive(false);
     };
     owner.onRunningChange = (running) => {
         if (running) starting = false;
@@ -397,6 +402,7 @@ async function start() {
             clearInterruptRecovery();
             awaitingListen = false;
             modelSpeaking = false;
+            player?.setResponseActive(false);
             hint('已打断，正在听你说');
         };
         player.onInterruptTimeout = () => {
@@ -519,7 +525,12 @@ function updatePrompt() {
     storage.set(PROMPT_STORAGE_KEY, $('systemPrompt').value);
 }
 
-$('systemPrompt').value = storage.get(PROMPT_STORAGE_KEY, DEFAULT_PROMPT);
+const savedPrompt = storage.get(PROMPT_STORAGE_KEY, null);
+// Migrate only the previous shipped default; keep custom prompts unchanged.
+const previousDefaultPrompt = DEFAULT_PROMPT.replace('你叫阿萍，是一名', '你是一名');
+const useCurrentDefault = savedPrompt === null || savedPrompt === previousDefaultPrompt;
+$('systemPrompt').value = useCurrentDefault ? DEFAULT_PROMPT : savedPrompt;
+if (useCurrentDefault) storage.set(PROMPT_STORAGE_KEY, DEFAULT_PROMPT);
 $('systemPrompt').addEventListener('input', updatePrompt);
 $('btnResetPrompt').addEventListener('click', () => {
     $('systemPrompt').value = DEFAULT_PROMPT;

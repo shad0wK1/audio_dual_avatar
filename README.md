@@ -118,3 +118,26 @@ configured ffmpeg build provides `libx264`.
 Design notes, scheduling, bridge and frontend details (Chinese): [DIGITAL_HUMAN_INTEGRATION.md](DIGITAL_HUMAN_INTEGRATION.md).
 
 Platform integration and API handoff guide (Chinese): [PLATFORM_INTEGRATION_GUIDE.md](PLATFORM_INTEGRATION_GUIDE.md).
+
+
+### Stable crop cache for the knowledge-sharing avatar
+
+The current deployment uses `knowledge_host_720p_stable_v1` with the same
+768 x 1344 source images, smoothed crop boxes and matching regenerated VAE
+references/masks. The original `knowledge_host_720p` cache is retained.
+After preparing the original cache, rebuild the stable cache once with:
+
+```bash
+CUDA_VISIBLE_DEVICES=2 .venv/bin/python musetalk_project/MuseTalk/scripts/prepare_stable_cache.py
+```
+
+The streaming preset uses centered audio features and
+`inference.face_stability_strength: 0.22` (0 disables the causal lower-face
+stabilizer). H.264 transport, microphone capture and interruption remain enabled.
+
+
+### 连续语音播放与推理延迟
+
+数字人播放器在句首保留 300 ms 音频缓冲，连续分段按实际音频采样长度无缝排程；续段仅等待 2 帧视频。待播语音未结束时显示“语音缓冲中”，结束会话会清除旧回复尾段。MuseTalk 当前使用 batch_size=28，使用 veryfast H.264 编码，并在人物素材准备结束后关闭 cuDNN benchmark、重新预热。原生 768×1344 H.264、人物稳定缓存和插话逻辑继续使用。
+
+并行任务同时占用同一张 GPU 时仍可能发生推理延迟；这类延迟无法由传输缓冲完全消除。回归检查：`PYTHONPATH=musetalk_project/MuseTalk .venv/bin/python -m pytest -q musetalk_project/MuseTalk/tests minicpm_demo/tests/test_avatar_entry.py`；浏览器排程回归：`node minicpm_demo/tests/test_avatar_scheduling.mjs`。

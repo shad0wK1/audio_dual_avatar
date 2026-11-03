@@ -90,6 +90,7 @@ class InferencePipeline:
         args = state.args
         assert args is not None
 
+        feature_started = time.monotonic()
         (
             whisper_input_features,
             librosa_length,
@@ -110,6 +111,7 @@ class InferencePipeline:
             feature_window_left=args.feature_window_left,
             feature_window_right=args.feature_window_right,
         )
+        feature_seconds = time.monotonic() - feature_started
         total_frames = segment.total_frames
         extra_frames = segment.extra_frames
         inference_frames = total_frames + extra_frames
@@ -173,6 +175,7 @@ class InferencePipeline:
                     frame_offset=segment.global_start_frame,
                     whisper_offset=frame_offset,
                 ):
+                    batch_started = time.monotonic()
                     audio_feature_batch = runtime.pe(whisper_batch)
                     latent_batch = latent_batch.to(
                         device=runtime.device,
@@ -189,6 +192,11 @@ class InferencePipeline:
                     )
                     recon = runtime.vae.decode_latents(pred_latents)
                     batch_seconds = time.monotonic() - batch_started
+                    if batch_indices[0] == 0:
+                        log(f"inference timing: segment={segment.id} "
+                            f"feature_ms={feature_seconds * 1000:.1f} "
+                            f"first_batch_ms={batch_seconds * 1000:.1f} "
+                            f"batch_size={args.batch_size}")
                     if batch_seconds > 2:
                         log(
                             f"slow inference batch: valid={len(batch_indices)} "
