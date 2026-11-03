@@ -141,3 +141,8 @@ stabilizer). H.264 transport, microphone capture and interruption remain enabled
 数字人播放器在句首保留 300 ms 音频缓冲，连续分段按实际音频采样长度无缝排程；续段仅等待 2 帧视频。待播语音未结束时显示“语音缓冲中”，结束会话会清除旧回复尾段。MuseTalk 当前使用 batch_size=28，使用 veryfast H.264 编码，并在人物素材准备结束后关闭 cuDNN benchmark、重新预热。原生 768×1344 H.264、人物稳定缓存和插话逻辑继续使用。
 
 并行任务同时占用同一张 GPU 时仍可能发生推理延迟；这类延迟无法由传输缓冲完全消除。回归检查：`PYTHONPATH=musetalk_project/MuseTalk .venv/bin/python -m pytest -q musetalk_project/MuseTalk/tests minicpm_demo/tests/test_avatar_entry.py`；浏览器排程回归：`node minicpm_demo/tests/test_avatar_scheduling.mjs`。
+
+
+### 视频缓冲自动恢复
+
+打断时按播放批次过滤队列，保留新批次已经生成的关键帧。音频已经到达、对应视频连续 1.5 秒没有进展时，前端请求服务端重放待播区间需要的关键帧和后续帧，恢复解码后继续排程待播语音；恢复过程保留对话和麦克风。重放按批次隔离、限频并限制缓存大小。可运行 `node minicpm_demo/tests/test_avatar_video_recovery.mjs` 检查恢复条件和语音保留逻辑。

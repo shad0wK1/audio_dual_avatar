@@ -41,6 +41,10 @@ class LiveStreamSession:
         self.control_messages: list[dict[str, Any]] = []
         self.max_prefetch_frames = 0
         self.flush_seq = state.pipeline.flush_seq
+        self.replay_packets: list[bytes] = []
+        self.replay_bytes = 0
+        self.resync_requested = False
+        self.last_resync_at = -float("inf")
         default_format = os.environ.get("AVATAR_STREAM_FORMAT", "h264").lower()
         requested_format = (
             websocket.query_params.get("video_codec", "")
@@ -183,6 +187,7 @@ class LiveStreamSession:
                     "audio_dir": args.audio_dir,
                     "frame_header_bytes": FRAME_HEADER.size,
                     "clock": "audio-samples",
+                    "video_resync": True,
                     "width": state.model.width,
                     "height": state.model.height,
                     "video_codec": (
@@ -322,6 +327,7 @@ class LiveStreamSession:
                 ):
                     continue
                 await self.websocket.send_bytes(packet)
+                self._remember_video_packet(packet)
                 self.last_sent_frame = max(
                     self.last_sent_frame,
                     frame_index,
@@ -360,6 +366,30 @@ class LiveStreamSession:
             state.viewer.playback_started = False
             log("live viewer disconnected")
 
+    def _remember_video_packet(self, packet: bytes) -> None:
+        if packet[:4] == b"MTH1":
+            keyframe = bool(packet[6] & 1)
+        elif packet[24:28] == b"H264":
+            keyframe = bool(packet[28])
+        else:
+            return
+        if keyframe or self.replay_packets:
+            self.replay_packets.append(packet)
+            self.replay_bytes += len(packet)
+        # A future IDR must not evict the keyframe needed by audio that has
+        # not started. Retire GOPs only after the viewer has played them.
+        cut = 0
+        for offset, cached in enumerate(self.replay_packets):
+            is_key = bool(cached[6] & 1) if cached[:4] == b"MTH1" else bool(cached[28])
+            if is_key and int.from_bytes(cached[20:24], "big") <= self.acked_frame:
+                cut = offset
+        if cut:
+            self.replay_bytes -= sum(map(len, self.replay_packets[:cut]))
+            del self.replay_packets[:cut]
+        if len(self.replay_packets) > max(64, self.state.model.fps * 10) or self.replay_bytes > 8 * 1024 * 1024:
+            self.replay_packets.clear()
+            self.replay_bytes = 0
+
     def _drop_queued_frames(self) -> None:
         for frame_queue in (self.raw_queue, self.network_queue):
             if frame_queue is None:
@@ -390,6 +420,9 @@ class LiveStreamSession:
         state = self.state
         if state.pipeline.flush_seq != self.flush_seq:
             self.flush_seq = state.pipeline.flush_seq
+            self.replay_packets.clear()
+            self.replay_bytes = 0
+            self.resync_requested = False
             flush_frame = state.pipeline.flush_frame
             self._drop_queued_frames()
             self.acked_frame = flush_frame
@@ -400,6 +433,18 @@ class LiveStreamSession:
             self.credit_event.set()
         while self.control_messages:
             await self.websocket.send_json(self.control_messages.pop(0))
+        if self.resync_requested:
+            self.resync_requested = False
+            replay = list(self.replay_packets)
+            generation = self.flush_seq
+            replayed = 0
+            for packet in replay:
+                if self.state.pipeline.flush_seq != generation:
+                    break
+                await self.websocket.send_bytes(packet)
+                replayed += 1
+            log(f"video resync: replayed={replayed} generation={generation}")
+            await self.websocket.send_json({"type": "video_resync", "replayed": replayed})
 
     async def _ack_reader(self) -> None:
         state = self.state
@@ -419,6 +464,12 @@ class LiveStreamSession:
                 state.viewer.last_ack_time = time.monotonic()
                 self.credit_event.set()
                 log("viewer entered the live room")
+            elif kind == "video_resync":
+                now = time.monotonic()
+                if now - self.last_resync_at >= 1.0:
+                    self.last_resync_at = now
+                    self.resync_requested = True
+                    self.credit_event.set()
             elif kind == "ack":
                 try:
                     frame_index = int(message.get("frame_index"))

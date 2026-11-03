@@ -1,4 +1,4 @@
-import { AvatarPlayer, INTERRUPT_FLUSH_TIMEOUT_MS } from './avatar-player.js?v=stutter2';
+import { AvatarPlayer, INTERRUPT_FLUSH_TIMEOUT_MS } from './avatar-player.js?v=bufferfix2';
 import { SpeechInterruptor } from './speech-interruptor.js?v=prompt2';
 import { RealtimeSession } from '../duplex/lib/realtime-session.js';
 import { arrayBufferToBase64, resampleAudio } from '../duplex/lib/duplex-utils.js';

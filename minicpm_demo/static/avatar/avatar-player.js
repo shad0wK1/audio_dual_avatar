@@ -53,6 +53,7 @@ export class AvatarPlayer {
         this.prebuffer = 8;
         this.maxPrefetch = 4;
         this.closed = false;
+        this._supportsVideoResync = false;
         this.videoCodec = 'webp';
         this._codecString = 'avc1.640028';
         this._videoDecoder = null;
@@ -214,6 +215,8 @@ export class AvatarPlayer {
     _onControl(msg) {
         switch (msg.type) {
         case 'meta':
+            this._supportsVideoResync = Boolean(msg.video_resync)
+                && (msg.codec === 'h264' || msg.video_codec === 'h264');
             this._codecString = msg.codec_string || this._codecString;
             this.fps = msg.fps || 24;
             this.prebuffer = msg.prebuffer || 8;
@@ -252,6 +255,9 @@ export class AvatarPlayer {
             this.clearSubtitle();
             // The server restarts its timeline right after this frame.
             if (Number.isFinite(msg.frame_index)) {
+                // Canceled future segments must not leave a future clock
+                // offset on the next response. Anchor the new timeline now.
+                if (this.ctx) this.epoch = this.ctx.currentTime - (msg.frame_index + 1) / this.fps;
                 this.lastDrawn = Math.min(this.lastDrawn, msg.frame_index);
                 for (const [index, frame] of this.frames) {
                     if (index > msg.frame_index) {
@@ -495,6 +501,29 @@ export class AvatarPlayer {
 
     // ---- playback clock ----
 
+    _checkVideoBuffer(nowMs) {
+        const pending = this.segments[this.scheduleCursor];
+        if (!this._supportsVideoResync || !pending || !pending.audioBuffer
+            || this._discardUntilFlush || this._hasPrebuffer(pending)) {
+            this._videoBufferWait = null;
+            return;
+        }
+        const count = pending.receivedFrames.size;
+        const waiting = this._videoBufferWait;
+        if (!waiting || waiting.segment !== pending || waiting.count !== count) {
+            this._videoBufferWait = { segment: pending, count, since: nowMs };
+            return;
+        }
+        if (nowMs - waiting.since < 1500 || nowMs - this._lastVideoResyncAt < 2500
+            || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+        // Recover the decoder from a bounded GOP replay without dropping
+        // pending audio, resetting the conversation or disabling the mic.
+        this._resetVideoDecoder();
+        this.ws.send(JSON.stringify({ type: 'video_resync' }));
+        this._lastVideoResyncAt = nowMs;
+        waiting.since = nowMs;
+    }
+
     _render() {
         this._raf = requestAnimationFrame(() => this._render());
         if (!this.ctx || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
@@ -510,6 +539,7 @@ export class AvatarPlayer {
         const target = this._playbackTarget(now);
         this._drawAt(target);
         this._ack(this.lastDrawn);
+        this._checkVideoBuffer(performance.now());
 
         const segment = this.segments[this.currentIndex];
         const speaking = Boolean(
@@ -518,11 +548,12 @@ export class AvatarPlayer {
         );
         this._speaking = speaking;
         const playbackState = speaking ? 'speaking'
-            : this._responseActive || this.hasPendingSpeech ? 'buffering' : 'idle';
+            : this.hasPendingSpeech ? 'buffering' : this._responseActive ? 'generating' : 'idle';
         if (playbackState !== this._playbackState) {
             this._playbackState = playbackState;
             this._setStatus(playbackState, speaking ? '数字人说话中'
-                : playbackState === 'buffering' ? '语音缓冲中…' : '数字人待机');
+                : playbackState === 'buffering' ? '语音缓冲中…'
+                    : playbackState === 'generating' ? '正在生成语音…' : '数字人待机');
         }
     }
 
@@ -651,6 +682,8 @@ export class AvatarPlayer {
     }
 
     _resetTimeline() {
+        this._videoBufferWait = null;
+        this._lastVideoResyncAt = -Infinity;
         this._responseActive = false;
         this._playbackState = null;
         this._resetVideoDecoder();

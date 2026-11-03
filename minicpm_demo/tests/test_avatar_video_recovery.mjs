@@ -1,0 +1,21 @@
+import fs from 'node:fs/promises';
+import assert from 'node:assert/strict';
+const source=await fs.readFile(process.argv[2]||new URL('../static/avatar/avatar-player.js',import.meta.url),'utf8');
+const {AvatarPlayer}=await import('data:text/javascript;base64,'+Buffer.from(source).toString('base64'));
+globalThis.WebSocket={OPEN:1};
+const player=new AvatarPlayer({canvas:{}});
+const sent=[];player.ws={readyState:1,send:x=>sent.push(JSON.parse(x))};
+const audio={duration:1};const pending={startFrame:0,totalFrames:24,audioBuffer:audio,receivedFrames:new Set()};
+player.segments=[pending];player._supportsVideoResync=true;
+player._checkVideoBuffer(0);player._checkVideoBuffer(1499);assert.equal(sent.length,0);
+player._checkVideoBuffer(1500);assert.deepEqual(sent,[{type:'video_resync'}]);
+assert.equal(player.segments[0].audioBuffer,audio,'video recovery must retain pending audio');
+assert.equal(player.scheduleCursor,0,'video recovery must not skip speech');
+player._checkVideoBuffer(3000);assert.equal(sent.length,1,'resync requests must be rate limited');
+pending.receivedFrames.add(0);player._checkVideoBuffer(4001);assert.equal(sent.length,1,'real progress postpones recovery');
+player._checkVideoBuffer(5501);assert.equal(sent.length,2);
+pending.receivedFrames=new Set([0,1,2,3,4,5,6,7]);player._checkVideoBuffer(10000);assert.equal(sent.length,2,'ready video needs no replay');
+pending.receivedFrames.clear();player._discardUntilFlush=true;player._checkVideoBuffer(20000);player._checkVideoBuffer(23000);assert.equal(sent.length,2,'an interrupt must not resurrect canceled audio');
+console.log('Video-buffer recovery timing, audio retention, progress and interruption checks passed');
+
+const clockPlayer=new AvatarPlayer({canvas:{}});clockPlayer.ctx={currentTime:12};clockPlayer.epoch=100;clockPlayer.lastDrawn=239;clockPlayer._onControl({type:"flush",frame_index:239});assert.equal(clockPlayer.epoch,2,"flush must discard the clock offset of canceled future speech");assert.equal(clockPlayer._playbackTarget(12),240);console.log("Flush resets the next reply to the current audio clock");
