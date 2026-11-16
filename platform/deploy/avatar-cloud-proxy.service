@@ -1,9 +1,0 @@
-[Unit]
-Description=Avatar API edition platform proxy
-After=avatar-cloud-bff.service avatar-cloud-web.service aigc-avatar-account.service
-PartOf=avatar-cloud-platform.target
-[Service]
-WorkingDirectory=%h/audio_dual_avatar_api/platform
-Environment=XDG_CONFIG_HOME=%h/audio_dual_avatar_api/platform/.run/config XDG_DATA_HOME=%h/audio_dual_avatar_api/platform/.run/data
-ExecStart=%h/audio_dual_avatar/aigc-platform/.runtime/caddy/usr/bin/caddy run --config %h/audio_dual_avatar_api/platform/deploy/Caddyfile --adapter caddyfile
-Restart=on-failure

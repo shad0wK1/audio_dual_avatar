@@ -1,4 +1,0 @@
-[Unit]
-Description=Avatar API edition platform
-Requires=avatar-cloud-bff.service avatar-cloud-web.service avatar-cloud-proxy.service aigc-avatar-account.service
-After=avatar-cloud-bff.service avatar-cloud-web.service avatar-cloud-proxy.service aigc-avatar-account.service
