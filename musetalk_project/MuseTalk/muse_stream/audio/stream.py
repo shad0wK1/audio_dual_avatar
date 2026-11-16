@@ -36,6 +36,8 @@ class StreamAudioSession:
         )
         # Core windows end on frame boundaries counted from the stream start,
         # so window lengths never drift from the video frame clock.
+        self.response_id: str | None = None
+        self.leading_pad_samples = 0
         self.frames_submitted = 0
         self.samples_submitted = 0
         self.window_samples = max(1, self._frame_sample(self.window_frames))
@@ -414,6 +416,8 @@ class StreamAudioSession:
             core_frames,
             self.overlap_frames,
             self.pause_overlap_frames,
+            self.response_id,
+            self.samples_submitted - core_sample_count - self.leading_pad_samples,
         )
         self.window_index += 1
         if segment is None:

@@ -1520,7 +1520,7 @@ async def avatar_page():
     if not app_registry.is_enabled("avatar") or not avatar_http_url():
         fallback = "/omni" if app_registry.is_enabled("omni") else "/"
         return RedirectResponse(url=fallback, status_code=302)
-    return FileResponse(os.path.join(static_dir, "avatar", "avatar.html"))
+    return RedirectResponse(url="/avatar-v2", status_code=302)
 
 
 @app.get("/avatar-v2", response_class=HTMLResponse)

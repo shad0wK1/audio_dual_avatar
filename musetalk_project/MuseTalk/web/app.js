@@ -180,9 +180,7 @@ async function refreshStatus() {
 function connectLive() {
   if (ui.ws && ui.ws.readyState <= WebSocket.OPEN) return;
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  const ws = new WebSocket(
-    `${protocol}//${location.host}/ws/live?video_codec=webp`,
-  );
+  const ws = new WebSocket(`${protocol}//${location.host}/ws/live`);
   ui.ws = ws;
   ws.binaryType = "arraybuffer";
   const connectTimer = setTimeout(() => {

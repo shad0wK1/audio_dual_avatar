@@ -160,6 +160,8 @@ class SegmentManager:
         core_frames: int | None = None,
         extra_frames: int = 0,
         pause_extra_frames: int = 0,
+        response_id: str | None = None,
+        response_start_sample: int = 0,
     ) -> LiveSegment | None:
         state = self.state
         assert state.ingest.output_audio_dir is not None
@@ -224,6 +226,8 @@ class SegmentManager:
             playback_wav_path=playback_wav_path,
             extra_frames=extra_frames,
             pause_extra_frames=pause_extra_frames,
+            response_id=response_id,
+            response_start_sample=response_start_sample,
         )
 
     def _register_wav(
@@ -239,6 +243,8 @@ class SegmentManager:
         extra_frames: int = 0,
         pause_extra_frames: int = 0,
         is_final: bool = False,
+        response_id: str | None = None,
+        response_start_sample: int = 0,
     ) -> LiveSegment | None:
         state = self.state
         args = state.args
@@ -381,6 +387,8 @@ class SegmentManager:
             extra_frames=requested_extra,
             pause_boundary=pause_boundary,
             is_final=is_final,
+            response_id=response_id,
+            response_start_sample=response_start_sample,
         )
         with state.pipeline.lock:
             state.pipeline.segments[segment_id] = segment

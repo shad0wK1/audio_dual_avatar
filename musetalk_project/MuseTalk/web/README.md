@@ -52,7 +52,7 @@ data/audio/ 新文件
   └─ ffmpeg 转 16k mono WAV
        └─ LiveSegment 队列
             ├─ 推理线程：采样计数 → PTS；默认 VAD 关闭
-            ├─ 编码线程：融合 + H.264/WebP encode
+            ├─ 编码线程：融合 + JPEG encode
             └─ WebSocket /ws/live 推送
 浏览器
   ├─ Web Audio：按 segment 的 start_pts_us 排程音频
@@ -116,11 +116,7 @@ data/audio/ 新文件
 | `server.batch_size` | 推理 batch，默认 20 |
 | `server.prebuffer` | 每段开始播放前需要的帧数，默认 8 |
 | `server.queue_size` | 网络发送队列上限 |
-| `server.jpeg_quality` | WebP/JPEG 回退质量 |
-
-直播默认使用 H.264。二进制帧头为 `MTH1`，每帧携带一个 Annex-B Access Unit；
-浏览器必须使用 WebCodecs `VideoDecoder`。调试页显式连接
-`/ws/live?video_codec=webp`，继续使用原有 `MTF1` 图片帧协议。
+| `server.jpeg_quality` | JPEG 压缩质量 |
 | `models.*` | UNet、VAE、Whisper 路径 |
 | `avatar.*` | avatar id、源视频、bbox 和融合参数 |
 | `inference.silence_threshold_dbfs` | 静音判定阈值，默认 `-45` dBFS |

@@ -266,6 +266,8 @@ class LiveStreamSession:
                                 segment.global_start_frame,
                                 state.model.fps,
                             ),
+                            "response_id": segment.response_id,
+                            "response_start_sample": segment.response_start_sample,
                             "sample_count": segment.sample_count,
                             "sample_rate": segment.sample_rate,
                             "speech_frames": segment.speech_frames,

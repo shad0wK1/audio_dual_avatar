@@ -73,7 +73,7 @@ ws://<host-ip>:<published-port>/ws/audio
 wss://<domain>/ws/audio
 ```
 
-首次打开或更新前端后建议 `Ctrl+F5` 强制刷新。当前静态资源版本为 `app.js?v=h2641`。
+首次打开或更新前端后建议 `Ctrl+F5` 强制刷新。当前静态资源版本为 `app.js?v=20261023-stream2`。
 
 点击一次“进入直播”以解锁浏览器音频。默认使用 `live.input_mode: stream`，
 由上游通过 `/ws/audio` 推送 16 kHz 单声道 PCM。也可以在配置中切换为
@@ -702,20 +702,6 @@ output/code_snapshot/
 `output/benchmark_stages.md` 和 `output/benchmark_stages.json`。
 
 ## 12. 变更记录
-
-### 2026-11-02
-
-- 新增 H.264 视频编码通路：`/ws/live?video_codec=h264` 由 ffmpeg/libx264
-  编码 Annex-B Access Unit，通过 `MTH1` 24 字节帧头发送；默认目标码率 2 Mbps、
-  最大 3 Mbps、每 120 帧一个周期 IDR；`flush` 时重启编码器强制立即产生 IDR。
-- `/ws/live` 新增 `video_codec` 查询参数，可选 `h264`、`webp`、`jpeg`；
-  不传时读取 `AVATAR_STREAM_FORMAT`，当前默认 `h264`。
-- `meta` 消息新增 `video_codec` 和 `codec_string`；H.264 帧头新增 codec 和
-  keyframe flags 字段。
-- 保留 `MTF1` WebP/JPEG 逐帧图片协议作为兼容回退；不支持 WebCodecs 的客户端
-  必须显式请求 `video_codec=webp`。
-- MuseTalk 自带调试页和 `headless_live_viewer.py` 显式使用 WebP，避免 H.264
-  改造破坏现有调试链路。
 
 ### 2026-10-23
 

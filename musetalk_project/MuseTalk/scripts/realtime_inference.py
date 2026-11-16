@@ -107,11 +107,7 @@ class Avatar:
                     osmakedirs([self.avatar_path, self.full_imgs_path, self.video_out_path, self.mask_out_path])
                     self.prepare_material()
                 else:
-                    self.input_latent_list_cycle = torch.load(
-                        self.latents_out_path,
-                        map_location="cpu",
-                        weights_only=True,
-                    )
+                    self.input_latent_list_cycle = torch.load(self.latents_out_path)
                     with open(self.coords_path, 'rb') as f:
                         self.coord_list_cycle = pickle.load(f)
                     input_img_list = glob.glob(os.path.join(self.full_imgs_path, '*.[jpJP][pnPN]*[gG]'))
@@ -130,26 +126,25 @@ class Avatar:
                 self.prepare_material()
         else:
             if not os.path.exists(self.avatar_path):
-                raise FileNotFoundError(
-                    f"{self.avatar_id} cache does not exist; "
-                    "create the avatar cache before enabling reuse"
-                )
+                print(f"{self.avatar_id} does not exist, you should set preparation to True")
+                sys.exit()
 
             with open(self.avatar_info_path, "r") as f:
                 avatar_info = json.load(f)
 
             if avatar_info['bbox_shift'] != self.avatar_info['bbox_shift']:
-                raise RuntimeError(
-                    f"avatar cache bbox_shift mismatch: "
-                    f"cached={avatar_info['bbox_shift']} "
-                    f"requested={self.avatar_info['bbox_shift']}"
-                )
+                response = input(f" 【bbox_shift】 is changed, you need to re-create it ! (c/continue)")
+                if response.lower() == "c":
+                    shutil.rmtree(self.avatar_path)
+                    print("*********************************")
+                    print(f"  creating avator: {self.avatar_id}")
+                    print("*********************************")
+                    osmakedirs([self.avatar_path, self.full_imgs_path, self.video_out_path, self.mask_out_path])
+                    self.prepare_material()
+                else:
+                    sys.exit()
             else:
-                self.input_latent_list_cycle = torch.load(
-                    self.latents_out_path,
-                    map_location="cpu",
-                    weights_only=True,
-                )
+                self.input_latent_list_cycle = torch.load(self.latents_out_path)
                 with open(self.coords_path, 'rb') as f:
                     self.coord_list_cycle = pickle.load(f)
                 input_img_list = glob.glob(os.path.join(self.full_imgs_path, '*.[jpJP][pnPN]*[gG]'))

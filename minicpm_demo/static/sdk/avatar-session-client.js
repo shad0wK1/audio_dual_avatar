@@ -13,10 +13,10 @@ const IDLE_SEGMENT = 0xffffffff;
 const FRAME_IDLE = 0;
 const FRAME_SILENT = 2;
 const FRAME_FLAG_KEYFRAME = 1;
-const H264_CODEC = 'avc1.640028';
-const AUDIO_START_BUFFER_S = 0.30;
+const H264_CODEC = 'avc1.4D4028';
+const AUDIO_START_BUFFER_S = 0.08;
 const AUDIO_CONTINUATION_LEAD_S = 0.012;
-const CLIENT_PREBUFFER_FRAMES = 8;
+const CLIENT_PREBUFFER_FRAMES = 3;
 const CONTINUATION_PREBUFFER_FRAMES = 2;
 const TIMELINE_SLACK_S = 0.01;
 const INTERRUPT_TIMEOUT_MS = 3000;
@@ -27,6 +27,8 @@ class AvatarCaptureProcessor extends AudioWorkletProcessor {
         this.chunkSize = options.processorOptions?.chunkSize || 16000;
         this.buffer = new Float32Array(0);
         this.active = false;
+        this.meterSamples = 0;
+        this.meterEnergy = 0;
         this.port.onmessage = ({ data }) => {
             if (data?.command === 'start') {
                 this.active = true;
@@ -49,6 +51,13 @@ class AvatarCaptureProcessor extends AudioWorkletProcessor {
         const output = outputs[0]?.[0];
         if (input && output) output.set(input);
         if (!this.active || !input?.length) return true;
+        for (const sample of input) this.meterEnergy += sample * sample;
+        this.meterSamples += input.length;
+        if (this.meterSamples >= sampleRate * 0.032) {
+            this.port.postMessage({ type: 'level', rms: Math.sqrt(this.meterEnergy / this.meterSamples) });
+            this.meterEnergy = 0;
+            this.meterSamples = 0;
+        }
         const combined = new Float32Array(this.buffer.length + input.length);
         combined.set(this.buffer);
         combined.set(input, this.buffer.length);
@@ -143,6 +152,9 @@ export class AvatarSessionClient {
         metadata = {},
         inputFormat = 'pcm_f32le_16000',
         microphoneDeviceId = '',
+        speechInterruptor = null,
+        idleVideo = null,
+        binaryMicrophone = false,
         apiPrefix = '/v1/avatar',
         ownerId = '',
     } = {}) {
@@ -154,6 +166,13 @@ export class AvatarSessionClient {
         this.metadata = metadata;
         this.inputFormat = inputFormat;
         this.microphoneDeviceId = microphoneDeviceId;
+        this.speechInterruptor = speechInterruptor;
+        this.idleVideo = idleVideo;
+        this.binaryMicrophone = binaryMicrophone;
+        this.lastRemoteKind = null;
+        this.lastIdlePaint = -1;
+        this.lastRemoteDrawTime = 0;
+        this.responseActive = false;
         this.apiPrefix = apiPrefix.replace(/\/$/, '');
         this.ownerId = ownerId;
         this.session = null;
@@ -181,6 +200,8 @@ export class AvatarSessionClient {
         this.epoch = 0;
         this.frames = new Map();
         this.pendingAudio = new Map();
+        this.highestSegmentId = -1;
+        this.cancelledThrough = -1;
         this.lastDrawn = -1;
         this.lastAck = -1;
         this.lastMediaAck = -1;
@@ -188,12 +209,15 @@ export class AvatarSessionClient {
         this.videoDecoder = null;
         this.decoderMeta = new Map();
         this.decoderGeneration = 0;
+        this.decodeSequence = 0;
+        this.lastResyncAt = -Infinity;
         this.waitingKeyframe = false;
         this.discardUntilFlush = false;
         this.renderHandle = 0;
         this.interruptTimer = null;
         this.listeners = new Map();
         this._readyWaiter = null;
+        this._connectAbort = new AbortController();
     }
 
     on(type, handler) {
@@ -215,6 +239,15 @@ export class AvatarSessionClient {
     }
 
     async connect() {
+        try {
+            return await this._connect();
+        } catch (error) {
+            this.close();
+            throw error;
+        }
+    }
+
+    async _connect() {
         if (this.closed) throw new Error('Avatar session is closed');
         if (!this.audioCtx) {
             this.audioCtx = new AudioContext();
@@ -227,6 +260,7 @@ export class AvatarSessionClient {
             new URL(`${this.apiPrefix}/sessions`, this.baseUrl),
             {
                 method: 'POST',
+                signal: this._connectAbort.signal,
                 headers: {
                     'Content-Type': 'application/json',
                     ...(this.apiKey
@@ -249,13 +283,15 @@ export class AvatarSessionClient {
             throw await _responseError(response, 'Failed to create avatar session');
         }
         this.session = await response.json();
+        if (this.closed) throw new Error('Avatar session is closed');
         this._emit('sessionCreated', this.session);
 
         const streamUrl = new URL(this.session.stream_url, this.baseUrl);
         streamUrl.protocol = streamUrl.protocol === 'https:' ? 'wss:' : 'ws:';
         const ready = new Promise((resolve, reject) => {
             const timer = setTimeout(() => {
-                reject(new Error('Avatar session did not become ready'));
+                this._failReady(new Error('Avatar session did not become ready'));
+                this.close();
             }, 150000);
             this._readyWaiter = {
                 resolve: (value) => {
@@ -268,6 +304,8 @@ export class AvatarSessionClient {
                 },
             };
         });
+        // The socket may fail before the open waiter resolves.
+        ready.catch(() => {});
 
         this.ws = new WebSocket(streamUrl.toString());
         this.ws.binaryType = 'arraybuffer';
@@ -282,13 +320,16 @@ export class AvatarSessionClient {
             this._failReady(new Error('Avatar WebSocket failed'));
         };
         this.ws.onclose = () => {
-            if (!this.closed) {
-                this._emit('closed', { reason: 'socket_closed' });
-            }
             this._failReady(new Error('Avatar WebSocket closed'));
+            this.close();
         };
         await new Promise((resolve, reject) => {
             this.ws.onopen = resolve;
+            const originalClose = this.ws.onclose;
+            this.ws.onclose = (event) => {
+                originalClose?.(event);
+                reject(new Error('Avatar WebSocket closed before opening'));
+            };
             const originalError = this.ws.onerror;
             this.ws.onerror = (event) => {
                 originalError?.(event);
@@ -297,6 +338,7 @@ export class AvatarSessionClient {
         });
 
         const videoCodecs = await this._supportedVideoCodecs();
+        if (this.closed) throw new Error('Avatar session is closed');
         this.ws.send(JSON.stringify({
             type: 'session.start',
             capabilities: { video_codecs: videoCodecs },
@@ -424,6 +466,7 @@ export class AvatarSessionClient {
             this.fps = Number(message.fps || 24);
             this.prebuffer = Number(message.prebuffer || 8);
             this.videoCodec = message.video_codec || 'webp';
+            this.supportsResync = Boolean(message.video_resync);
             this.codecString = message.codec_string || H264_CODEC;
             if (message.width && message.height && this.canvas) {
                 this.canvas.width = Number(message.width);
@@ -451,12 +494,15 @@ export class AvatarSessionClient {
             this._emit('audioAccepted', message);
             break;
         case 'response.started':
+            this.responseActive = true;
             this._emit('responseStarted', message);
             break;
         case 'response.ended':
+            this.responseActive = false;
             this._emit('responseEnded', message);
             break;
         case 'response.interrupted':
+            this.responseActive = false;
             this._emit('interrupted', message);
             break;
         case 'media.segment':
@@ -466,7 +512,12 @@ export class AvatarSessionClient {
             this._emit('segmentEnd', message);
             break;
         case 'media.audio_error':
-            this._emit('error', new Error(message.message || 'Audio segment failed'));
+            {
+                const segment = this.segments.find(item => item.id === Number(message.segment_id));
+                if (segment) segment.audioFailed = true;
+                this._emit('error', new Error(message.message || 'Audio segment failed'));
+                this._scheduleReady();
+            }
             break;
         case 'media.flush':
             this._handleFlush(message);
@@ -498,16 +549,26 @@ export class AvatarSessionClient {
     }
 
     _addSegment(message) {
-        if (this.discardUntilFlush) return;
+        const id = Number(message.id);
+        this.highestSegmentId = Math.max(this.highestSegmentId, id);
+        if (this.discardUntilFlush || id <= this.cancelledThrough) return;
         const segment = {
             id: Number(message.id),
             totalFrames: Number(message.total_frames || 0),
             startFrame: Number(message.start_frame || 0),
             startPtsUs: Number(message.start_pts_us || 0),
             duration: Number(message.duration || 0),
+            responseId: message.response_id,
+            responseStartSample: message.response_start_sample,
+            sampleRate: message.sample_rate,
+            sampleCount: message.sample_count,
+            audioScheduled: false,
             audioBuffer: null,
             audioFailed: false,
             receivedFrames: new Set(),
+            highestWireFrame: -1,
+            missingSince: null,
+            resyncFrame: -1,
             startAt: null,
             source: null,
         };
@@ -531,6 +592,7 @@ export class AvatarSessionClient {
         );
         if (magicText === AUDIO_MAGIC) {
             const segmentId = view.getUint32(4);
+            if (segmentId <= this.cancelledThrough) return;
             const wav = buffer.slice(8);
             const segment = this.segments.find((item) => item.id === segmentId);
             if (segment) this._decodeSegmentAudio(segment, wav);
@@ -556,6 +618,7 @@ export class AvatarSessionClient {
                 this._scheduleReady();
             })
             .catch((error) => {
+                if (!this.segments.includes(segment)) return;
                 segment.audioFailed = true;
                 this._emit('error', error);
                 this._scheduleReady();
@@ -616,9 +679,13 @@ export class AvatarSessionClient {
                             meta.segmentId,
                             meta.ptsUs,
                         );
-                    }).finally(() => frame.close());
+                    }).catch(error => this._emit('frameDropped', error)).finally(() => frame.close());
                 },
-                error: (error) => this._emit('error', error),
+                error: (error) => {
+                    if (generation !== this.decoderGeneration || this.closed) return;
+                    this._resetDecoder();
+                    this._emit('decoderReset', error);
+                },
             });
             this.videoDecoder.configure({
                 codec: this.codecString,
@@ -635,19 +702,27 @@ export class AvatarSessionClient {
     }
 
     _decodeH264Frame(view, buffer) {
-        if (!this.videoDecoder) return;
         const kind = view.getUint8(4);
         const keyframe = (view.getUint8(6) & FRAME_FLAG_KEYFRAME) !== 0;
         const segmentId = view.getUint32(8);
         const ptsUs = Number(view.getBigInt64(12));
         const index = view.getUint32(20);
+        const segment = this.segments.find(item => item.id === segmentId);
+        if (segment) segment.highestWireFrame = Math.max(segment.highestWireFrame, index);
+        if (this.videoDecoder?.decodeQueueSize > this.fps * 2) this._resetDecoder();
+        if (!this.videoDecoder) {
+            if (!keyframe) return;
+            this._configureVideoDecoder();
+            if (!this.videoDecoder) return;
+        }
         if (this.waitingKeyframe && !keyframe) return;
         if (keyframe) this.waitingKeyframe = false;
-        this.decoderMeta.set(ptsUs, { kind, segmentId, ptsUs, index });
+        const timestamp = ++this.decodeSequence;
+        this.decoderMeta.set(timestamp, { kind, segmentId, ptsUs, index });
         try {
             this.videoDecoder.decode(new EncodedVideoChunk({
                 type: keyframe ? 'key' : 'delta',
-                timestamp: ptsUs,
+                timestamp,
                 data: new Uint8Array(buffer, 24),
             }));
         } catch (error) {
@@ -657,6 +732,22 @@ export class AvatarSessionClient {
     }
 
     _storeFrame(index, bitmap, kind, segmentId, ptsUs) {
+        // The shared Gateway timeline may continue across viewer connections.
+        // Start this viewer's clock at its first decoded frame, not frame zero.
+        if (this.lastDrawn < 0 && this.frames.size === 0 && this.audioCtx && !this.audioScheduleEnd) {
+            this.epoch = this.audioCtx.currentTime + 0.12 - ptsUs / 1e6;
+        }
+        // After an idle-stream underrun, consume the returning frames at their
+        // original cadence instead of jumping to the end of every network burst.
+        if (kind === FRAME_IDLE && this.lastDrawn >= 0 && index > this.lastDrawn
+            && this.lastDrawn === this.newestFrame && this.scheduleCursor === this.segments.length
+            && this.audioScheduleEnd <= this.audioCtx.currentTime) {
+            const nextDue = this.epoch + (this.lastDrawn + 1) / this.fps;
+            if (this.audioCtx.currentTime - nextDue > 2 / this.fps) {
+                this.epoch = this.audioCtx.currentTime - (this.lastDrawn + 1) / this.fps;
+            }
+        }
+        this.newestFrame = Math.max(this.newestFrame ?? -1, index);
         const old = this.frames.get(index);
         if (old) old.bitmap.close();
         this.frames.set(index, { bitmap, kind, segmentId, ptsUs });
@@ -669,6 +760,10 @@ export class AvatarSessionClient {
     }
 
     _hasPrebuffer(segment) {
+        return this._firstMissingFrame(segment) === null;
+    }
+
+    _firstMissingFrame(segment) {
         const continuation = this._isContinuation(segment);
         const needed = Math.min(
             segment.totalFrames,
@@ -676,10 +771,10 @@ export class AvatarSessionClient {
         );
         for (let offset = 0; offset < needed; offset += 1) {
             if (!segment.receivedFrames.has(segment.startFrame + offset)) {
-                return false;
+                return segment.startFrame + offset;
             }
         }
-        return true;
+        return null;
     }
 
     _isContinuation(segment) {
@@ -692,18 +787,33 @@ export class AvatarSessionClient {
         );
     }
 
+    _recoverMissingFrame(segment, missing) {
+        if (!this.supportsResync || this.videoCodec !== 'h264' || missing === null
+            || segment.highestWireFrame < missing || segment.resyncFrame === missing) return;
+        const now = performance.now();
+        if (segment.missingSince === null) segment.missingSince = now;
+        if (now - segment.missingSince < 1500 || now - this.lastResyncAt < 2500) return;
+        if (this.ws?.readyState !== WebSocket.OPEN || this.discardUntilFlush) return;
+        segment.resyncFrame = missing;
+        this.lastResyncAt = now;
+        this._configureVideoDecoder();
+        this.ws.send(JSON.stringify({ type: 'media.video_resync', segment_id: segment.id, frame_index: missing }));
+    }
+
     _scheduleReady() {
         if (!this.audioCtx) return;
         while (this.scheduleCursor < this.segments.length) {
             const segment = this.segments[this.scheduleCursor];
-            if (
-                (!segment.audioBuffer && !segment.audioFailed)
-                || !this._hasPrebuffer(segment)
-            ) {
-                break;
-            }
+            if (!segment.audioBuffer && !segment.audioFailed) break;
             const due = this.epoch + segment.startPtsUs / 1e6;
             const continuing = this._isContinuation(segment);
+            const missing = this._firstMissingFrame(segment);
+            if (missing !== null) {
+                this._recoverMissingFrame(segment, missing);
+                // For consecutive WAVs the prior audio already provides a clock.
+                // Schedule the samples now. Draw whichever lip frame is due on that clock.
+                if (!continuing) break;
+            }
             const when = continuing
                 ? Math.max(
                     this.audioScheduleEnd,
@@ -714,7 +824,7 @@ export class AvatarSessionClient {
                     due,
                     this.audioScheduleEnd,
                 );
-            if (!continuing && when - due > TIMELINE_SLACK_S) {
+            if (when - due > TIMELINE_SLACK_S) {
                 this.epoch += when - due;
             }
             segment.startAt = when;
@@ -728,6 +838,7 @@ export class AvatarSessionClient {
             source.connect(this.gain);
             source.start(when);
             segment.source = source;
+            segment.audioScheduled = true;
             this.audioScheduleEnd = when + segment.audioBuffer.duration;
         }
     }
@@ -770,6 +881,7 @@ export class AvatarSessionClient {
 
     _render() {
         if (!this.audioCtx || !this.canvas) return;
+        this._scheduleReady();
         const now = this.audioCtx.currentTime;
         while (this.currentIndex + 1 < this.segments.length) {
             const next = this.segments[this.currentIndex + 1];
@@ -794,7 +906,23 @@ export class AvatarSessionClient {
                 selected = frame;
             }
         }
-        if (!selected || selectedIndex <= this.lastDrawn) return;
+        if (!selected || selectedIndex <= this.lastDrawn) {
+            this._drawBufferedIdle();
+            return;
+        }
+        const previousKind = this.lastRemoteKind;
+        this.lastRemoteKind = selected.kind;
+        this.lastRemoteDrawTime = this.audioCtx.currentTime;
+        const idle = this.idleVideo;
+        if (idle && selected.kind === FRAME_IDLE && Number.isFinite(idle.duration) && idle.duration > 0) {
+            const phase = (selectedIndex / this.fps) % idle.duration;
+            if (!idle.seeking && (previousKind !== FRAME_IDLE || Math.abs(idle.currentTime - phase) > 0.18)) {
+                idle.currentTime = phase;
+            }
+            if (idle.paused) idle.play().catch(() => {});
+        } else if (idle && !idle.paused) {
+            idle.pause();
+        }
         const context = this.canvas.getContext('2d');
         context.drawImage(
             selected.bitmap,
@@ -803,8 +931,27 @@ export class AvatarSessionClient {
             this.canvas.width,
             this.canvas.height,
         );
+        const firstFrame = this.lastDrawn < 0;
         this.lastDrawn = selectedIndex;
+        if (firstFrame) this._emit('firstFrame', { index: selectedIndex });
         this._prune(selectedIndex);
+    }
+
+    _drawBufferedIdle() {
+        const idle = this.idleVideo;
+        if (!idle || this.lastRemoteKind !== FRAME_IDLE || idle.readyState < 2
+            || idle.seeking || idle.paused || this.discardUntilFlush) return false;
+        const now = this.audioCtx.currentTime;
+        if (now - this.lastRemoteDrawTime < 2 / this.fps) return false;
+        const current = this.segments[this.currentIndex];
+        if (current?.startAt != null && now >= current.startAt
+            && now < current.startAt + current.duration) return false;
+        const frame = Math.floor(idle.currentTime * this.fps);
+        if (this.lastIdlePaint === frame) return false;
+        this.lastIdlePaint = frame;
+        this.canvas.getContext('2d').drawImage(idle, 0, 0, this.canvas.width, this.canvas.height);
+        // The ACK clock tracks server frames only.
+        return true;
     }
 
     _prune(anchor) {
@@ -841,7 +988,7 @@ export class AvatarSessionClient {
             this.lastMediaAck = index;
             send = true;
         }
-        if (index - this.lastAck >= 6) {
+        if (index - this.lastAck >= 3) {
             this.lastAck = index;
             send = true;
         }
@@ -857,6 +1004,16 @@ export class AvatarSessionClient {
     }
 
     async prepareMicrophone() {
+        try {
+            return await this._prepareMicrophone();
+        } catch (error) {
+            this.close();
+            throw error;
+        }
+    }
+
+    async _prepareMicrophone() {
+        if (this.closed) throw new Error('Avatar session is closed');
         if (this.micStream) return;
         if (!this.audioCtx) {
             this.audioCtx = new AudioContext();
@@ -874,8 +1031,14 @@ export class AvatarSessionClient {
                     : {}),
             },
         });
+        if (this.closed) {
+            for (const track of stream.getTracks()) track.stop();
+            throw new Error('Avatar session is closed');
+        }
+        this.micStream = stream;
         // Match the proven /avatar capture ordering.
         const context = new AudioContext({ sampleRate: 16000 });
+        this.micCtx = context;
         await context.resume();
         const workletUrl = URL.createObjectURL(
             new Blob([CAPTURE_WORKLET_SOURCE], { type: 'text/javascript' }),
@@ -885,9 +1048,10 @@ export class AvatarSessionClient {
         } finally {
             URL.revokeObjectURL(workletUrl);
         }
+        if (this.closed) throw new Error('Avatar session is closed');
         const source = context.createMediaStreamSource(stream);
         const node = new AudioWorkletNode(context, 'avatar-session-capture', {
-            processorOptions: { chunkSize: context.sampleRate },
+            processorOptions: { chunkSize: Math.round(context.sampleRate / 5) },
         });
         const destination = context.createMediaStreamDestination();
         const analyser = context.createAnalyser();
@@ -897,6 +1061,15 @@ export class AvatarSessionClient {
         source.connect(analyser);
         const analyserSamples = new Float32Array(analyser.fftSize);
         node.port.onmessage = ({ data }) => {
+            if (data?.type === 'level') {
+                if (this.speechInterruptor && this.micActive && !this.closed) {
+                    const speaking = !this.discardUntilFlush && (this.responseActive
+                        || this.scheduleCursor < this.segments.length
+                        || this.audioScheduleEnd > this.audioCtx.currentTime);
+                    this.speechInterruptor.update(data.rms, speaking, this.muted);
+                }
+                return;
+            }
             if (data?.type !== 'chunk') return;
             const samples = _resampleAudio(
                 data.audio,
@@ -924,9 +1097,16 @@ export class AvatarSessionClient {
             ) {
                 return;
             }
+            const forceListen = !this.muted && Boolean(this.speechInterruptor?.forceListen());
+            if (this.binaryMicrophone) {
+                this.ws.send(_microphonePacket(samples, forceListen, energy === 0));
+                this.sequence++;
+                return;
+            }
             this.ws.send(JSON.stringify({
                 type: 'input.audio.append',
                 sequence: this.sequence++,
+                force_listen: forceListen,
                 audio: _arrayBufferToBase64(samples.buffer),
             }));
         };
@@ -962,15 +1142,42 @@ export class AvatarSessionClient {
         this._emit('microphoneStarted', null);
     }
 
+    _playedSamples() {
+        const ctx = this.audioCtx;
+        const result = Object.create(null);
+        if (!ctx) return result;
+        // Output time excludes rendered audio still queued at the device.
+        const outputTime = ctx.getOutputTimestamp?.().contextTime;
+        const now = Number.isFinite(outputTime) ? outputTime
+            : Math.max(0, ctx.currentTime - (ctx.outputLatency || ctx.baseLatency || 0));
+        const ends = new Map();
+        for (const segment of this.segments) {
+            const { responseId, sampleRate, sampleCount, responseStartSample, startAt } = segment;
+            if (!responseId || !segment.audioScheduled || startAt === null || startAt >= now
+                || !Number.isInteger(responseStartSample) || !(sampleRate > 0)) continue;
+            const previous = ends.get(responseId) || 0;
+            if (responseStartSample > previous) continue;
+            const elapsed = now - startAt;
+            const samples = elapsed >= segment.duration ? sampleCount
+                : Math.min(sampleCount, Math.floor(elapsed * sampleRate));
+            const end = Math.max(previous, responseStartSample + samples);
+            ends.set(responseId, end);
+            result[responseId] = Math.floor(end * 24000 / sampleRate);
+        }
+        return Object.fromEntries(Object.entries(result).slice(-11));
+    }
+
     interrupt() {
-        if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+        if (this.discardUntilFlush || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+        this.responseActive = false;
         this.discardUntilFlush = true;
+        const playback = this._playedSamples();
         this._dropFromCurrent();
         this._emit('interrupted', { reason: 'local_interrupt' });
-        this.ws.send(JSON.stringify({ type: 'input.interrupt' }));
+        this.ws.send(JSON.stringify({ type: 'input.interrupt', playback }));
         clearTimeout(this.interruptTimer);
         this.interruptTimer = setTimeout(() => {
-            this.discardUntilFlush = false;
+            // Delay is not proof the old media has been flushed.
             this._emit('interruptTimeout', null);
         }, INTERRUPT_TIMEOUT_MS);
     }
@@ -979,10 +1186,15 @@ export class AvatarSessionClient {
         clearTimeout(this.interruptTimer);
         this.interruptTimer = null;
         this.discardUntilFlush = false;
+        this.lastRemoteKind = null;
         this._dropFromCurrent();
         const frameIndex = Number(message.frame_index);
         if (Number.isFinite(frameIndex)) {
             this.lastDrawn = Math.min(this.lastDrawn, frameIndex);
+            this.newestFrame = this.lastDrawn;
+            this.lastAck = Math.min(this.lastAck, frameIndex);
+            this.lastMediaAck = Math.min(this.lastMediaAck, frameIndex);
+            if (this.audioCtx) this.epoch = this.audioCtx.currentTime - frameIndex / this.fps;
             for (const [index, frame] of this.frames) {
                 if (index > frameIndex) {
                     frame.bitmap.close();
@@ -998,21 +1210,16 @@ export class AvatarSessionClient {
     }
 
     _dropFromCurrent() {
-        for (let index = this.currentIndex; index < this.segments.length; index += 1) {
-            const segment = this.segments[index];
+        this.cancelledThrough = this.highestSegmentId;
+        for (const segment of this.segments) {
             this._stopSource(segment);
-            for (const frameIndex of segment.receivedFrames) {
-                const frame = this.frames.get(frameIndex);
-                if (frame) {
-                    frame.bitmap.close();
-                    this.frames.delete(frameIndex);
-                }
-            }
             this._releaseSegment(segment);
         }
-        this.segments = this.segments.slice(0, this.currentIndex);
-        this.scheduleCursor = this.segments.length;
-        this.currentIndex = this.segments.length;
+        for (const frame of this.frames.values()) frame.bitmap.close();
+        this.frames.clear();
+        this.segments = [];
+        this.scheduleCursor = 0;
+        this.currentIndex = 0;
         this.audioScheduleEnd = 0;
         this.pendingAudio.clear();
     }
@@ -1024,6 +1231,7 @@ export class AvatarSessionClient {
         } catch {
             // Already stopped.
         }
+        segment.source.disconnect();
         segment.source = null;
     }
 
@@ -1068,6 +1276,8 @@ export class AvatarSessionClient {
     }
 
     _cleanupMedia() {
+        this.idleVideo?.pause();
+        this.lastRemoteKind = null;
         if (this.renderHandle) cancelAnimationFrame(this.renderHandle);
         this.renderHandle = 0;
         clearTimeout(this.interruptTimer);
@@ -1118,6 +1328,8 @@ export class AvatarSessionClient {
     close() {
         if (this.closed) return;
         this.closed = true;
+        this._connectAbort.abort();
+        this._failReady(new Error('Avatar session is closed'));
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
             this.ws.send(JSON.stringify({
                 type: 'session.close',
@@ -1181,6 +1393,21 @@ function _resampleAudio(samples, fromRate, toRate) {
     return output;
 }
 
+
+function _microphonePacket(samples, forceListen, silent) {
+    const bytes = new Uint8Array(7 + (silent ? 0 : samples.length * 2));
+    bytes.set([77, 73, 67, 49]); // MIC1
+    const view = new DataView(bytes.buffer);
+    view.setUint8(4, Number(forceListen) | (silent ? 2 : 0));
+    view.setUint16(5, samples.length, true);
+    if (!silent) {
+        for (let i = 0; i < samples.length; i++) {
+            const value = Math.max(-32768, Math.min(32767, Math.round(samples[i] * 32768)));
+            view.setInt16(7 + i * 2, value, true);
+        }
+    }
+    return bytes;
+}
 
 function _arrayBufferToBase64(buffer) {
     const bytes = new Uint8Array(buffer);

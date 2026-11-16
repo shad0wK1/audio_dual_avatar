@@ -212,19 +212,6 @@ class AvatarSessionService:
                 ) from exc
 
             await self._activate_avatar(item["avatar_id"])
-            try:
-                voice = await asyncio.to_thread(
-                    self.preset_registry.voice_audio,
-                    preset_id,
-                    owner_id,
-                )
-            except AvatarPresetError as exc:
-                raise AvatarSessionError(
-                    str(exc),
-                    status_code=exc.status_code,
-                    code="avatar_preset_voice_error",
-                ) from exc
-
             prompt = str(
                 payload.get("system_prompt")
                 or item.get("prompt", {}).get("text")
@@ -236,8 +223,6 @@ class AvatarSessionService:
                 raise AvatarSessionError(
                     f"system_prompt exceeds {_MAX_PROMPT_BYTES} bytes"
                 )
-            if not prompt.startswith("Streaming"):
-                prompt = f"Streaming Audio Conversation. {prompt}"
 
             config = payload.get("config") or {}
             if not isinstance(config, dict):
@@ -261,10 +246,7 @@ class AvatarSessionService:
                 preset_name=item["name"],
                 init_payload={
                     "system_prompt": prompt,
-                    "config": {"length_penalty": length_penalty},
-                    "use_tts": True,
-                    "ref_audio_base64": voice["base64"],
-                    "tts_ref_audio_base64": voice["base64"],
+                    "preset_id": preset_id,
                 },
                 requested_codec=requested_codec,
                 metadata=metadata,
@@ -828,6 +810,9 @@ class _AvatarSessionRuntime:
             if kind == "input.interrupt":
                 self.input_generation += 1
                 self.active_response_id = None
+                await self.worker_ws.send(json.dumps({
+                    "type": "input.interrupt", "playback": payload.get("playback"),
+                }))
                 self.pending_force_listen = True
                 if self.bridge is not None:
                     self.bridge.flush("client_interrupt")

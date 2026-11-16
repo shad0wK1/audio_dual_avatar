@@ -1,0 +1,9 @@
+[Unit]
+Description=Avatar API edition BFF
+PartOf=avatar-cloud-platform.target
+[Service]
+WorkingDirectory=%h/audio_dual_avatar_api/platform/bff
+UnsetEnvironment=AVATAR_API_BASE_URL PLATFORM_PORT
+ExecStart=%h/audio_dual_avatar/avatar-platform-integration-20261107/.runtime/bin/python app.py
+Restart=on-failure
+RestartSec=2

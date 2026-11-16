@@ -1,4 +1,5 @@
-import { AvatarSessionClient } from '../sdk/avatar-session-client.js?v=avatar-delete2';
+import { SpeechInterruptor } from '../sdk/speech-interruptor.js';
+import { AvatarSessionClient } from '../sdk/avatar-session-client.js?v=cloud1';
 
 
 const $ = (id) => document.getElementById(id);
@@ -250,6 +251,7 @@ async function start() {
     try {
         const instance = new AvatarSessionClient({
             canvas: $('avatarCanvas'),
+            speechInterruptor: new SpeechInterruptor(() => instance.interrupt()),
             presetId: $('preset').value,
             microphoneDeviceId: $('micDevice').value,
             apiKey: $('apiKey').value.trim(),

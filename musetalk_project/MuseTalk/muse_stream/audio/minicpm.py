@@ -39,7 +39,7 @@ class MiniCPMBridgeSession(StreamAudioSession):
 
     def __init__(self, state, websocket) -> None:
         super().__init__(state, websocket)
-        self.response_id: str | None = None
+        self.leading_pad_samples = RESAMPLE_PAD
         self.last_response_id: str | None = None
         self.flushed_response_id: str | None = None
         self.turn_open = False

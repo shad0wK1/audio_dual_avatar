@@ -1,0 +1,9 @@
+[Unit]
+Description=Avatar API edition platform frontend
+PartOf=avatar-cloud-platform.target
+[Service]
+WorkingDirectory=%h/audio_dual_avatar_api/platform/web/apps/web
+Environment=HOSTNAME=127.0.0.1 PORT=13101 NODE_ENV=production NEXT_TELEMETRY_DISABLED=1
+ExecStart=%h/audio_dual_avatar/aigc-platform/.runtime/node/bin/node server.js
+Restart=on-failure
+SuccessExitStatus=143

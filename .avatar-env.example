@@ -1,41 +1,9 @@
-# Optional overrides sourced by start_avatar.sh.
-#
-# Single GPU:
-#   MINICPM_CUDA_VISIBLE_DEVICES=0
-#   MUSETALK_CUDA_VISIBLE_DEVICES=0
-#
-# Two GPUs:
-#   MINICPM_CUDA_VISIBLE_DEVICES=0
-#   MUSETALK_CUDA_VISIBLE_DEVICES=1
-#
-# Both values may also be CUDA UUIDs (GPU-...) instead of numeric indexes.
-MINICPM_CUDA_VISIBLE_DEVICES=0
-MUSETALK_CUDA_VISIBLE_DEVICES=1
-
-# Keep the local 480x864 output size. Set a positive width only when a lower
-# bandwidth stream is explicitly desired.
+# Copy to .avatar-env on the server. Select the GPU used by MuseTalk.
+MUSETALK_CUDA_VISIBLE_DEVICES=0
 AVATAR_STREAM_FORMAT=webp
 AVATAR_STREAM_MAX_WIDTH=0
-# CPU worker threads for WebP frame encoding. Four threads measured above
-# 24fps for the 720p avatar while leaving CPU headroom for inference/blending.
 AVATAR_ENCODE_THREADS=4
-
-# Front-end avatar customization jobs.
-AVATAR_CUSTOMIZATION_ENABLED=true
-# Relative paths are resolved from minicpm_demo/, not from the shell CWD.
-AVATAR_CUSTOMIZATION_DATA_ROOT=data/avatar_customizations
-# Optional explicit override. Defaults to
-# ${AVATAR_CUSTOMIZATION_DATA_ROOT}/avatar_presets.user.yaml.
-# AVATAR_RUNTIME_PRESET_FILE=
-AVATAR_CUSTOMIZATION_GPU=
-AVATAR_CUSTOMIZATION_ALLOW_BUSY=false
-AVATAR_CUSTOMIZATION_MIN_FREE_MB=12000
-AVATAR_CUSTOMIZATION_VIDEO_MAX_SECONDS=20
-AVATAR_CUSTOMIZATION_AUDIO_MAX_SECONDS=20
-AVATAR_CUSTOMIZATION_VIDEO_MAX_MB=200
-AVATAR_CUSTOMIZATION_AUDIO_MAX_MB=20
-AVATAR_CUSTOMIZATION_PROMPT_MAX_BYTES=65536
-
-# The 720p knowledge-sharing avatar is the default. To use the original avatar
-# cache as a fallback, uncomment this override.
-# MUSETALK_CONFIG=configs/streaming_duplex.yaml
+export AVATAR_H264_CRF=25
+export AVATAR_H264_MAX_KBPS=900
+# Set a private value and use the same value in the BFF as AVATAR_API_KEY.
+export AVATAR_SESSION_API_KEY=

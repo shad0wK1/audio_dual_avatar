@@ -79,6 +79,7 @@ class InferencePipeline:
 
     def __init__(self, state: AppState) -> None:
         self.state = state
+        self.last_gpu_ratio = 0.0
 
     def iter_segment(self, segment: LiveSegment):
         """Yield timestamped frames, bypassing UNet for silent audio windows."""
@@ -128,6 +129,14 @@ class InferencePipeline:
             f"start_pts={frame_pts_us(segment.global_start_frame, args.fps)}us"
         )
 
+        # The audio transport releases each WAV when its lip segment starts.
+        # If inference is consuming the playout reserve, keep the 24 Hz timeline
+        # and interpolate a few face crops instead of starving the audio queue.
+        with state.pipeline.lock:
+            lead = segment.global_start_frame - state.pipeline.ack_frame
+        under_load = self.last_gpu_ratio > 0.65 and lead <= args.fps * 1.5
+        inference_seconds = feature_seconds
+        inferred_count = 0
         cursor = 0
         batch_started = time.monotonic()
         with torch.no_grad():
@@ -144,6 +153,15 @@ class InferencePipeline:
                     cursor += 1
 
                 frame_indices = list(range(run_start, run_end))
+                if under_load and len(frame_indices) > args.batch_size:
+                    # Always infer both endpoints, including the overlap.
+                    batches = max(1, round(len(frame_indices) * 0.60 / args.batch_size))
+                    count = max(2, batches * args.batch_size)
+                    if count < len(frame_indices):
+                        frame_indices = np.linspace(run_start, run_end - 1, count).round().astype(int).tolist()
+                previous_offset = None
+                previous_face = None
+                inferred_count += len(frame_indices)
                 for (
                     batch_indices,
                     whisper_batch,
@@ -174,6 +192,7 @@ class InferencePipeline:
                     )
                     recon = runtime.vae.decode_latents(pred_latents)
                     batch_seconds = time.monotonic() - batch_started
+                    inference_seconds += batch_seconds
                     if batch_indices[0] == 0:
                         log(f"inference timing: segment={segment.id} "
                             f"feature_ms={feature_seconds * 1000:.1f} "
@@ -193,7 +212,14 @@ class InferencePipeline:
                         frame_index = (
                             segment.global_start_frame + batch_indices[offset]
                         )
+                        local_index = batch_indices[offset]
+                        if previous_offset is not None:
+                            for middle in range(previous_offset + 1, local_index):
+                                alpha = (middle - previous_offset) / (local_index - previous_offset)
+                                face = cv2.addWeighted(previous_face, 1-alpha, res_frame, alpha, 0)
+                                yield "generated", segment.global_start_frame + middle, face
                         yield "generated", frame_index, res_frame
+                        previous_offset, previous_face = local_index, res_frame
                 cursor = run_end
 
             while cursor < inference_frames:
@@ -206,6 +232,13 @@ class InferencePipeline:
                     ],
                 )
                 cursor += 1
+
+        if inferred_count and segment.duration >= 0.5:
+            # Estimate the cost at full detail so recovery does not oscillate.
+            ratio = inference_seconds * generated_frames / inferred_count / segment.duration
+            self.last_gpu_ratio = ratio if not self.last_gpu_ratio else 0.4*self.last_gpu_ratio + 0.6*ratio
+            if inferred_count < generated_frames:
+                log(f"adaptive lips: segment={segment.id} inferred={inferred_count}/{generated_frames} lead={lead}")
 
     def blend_frame(
         self,

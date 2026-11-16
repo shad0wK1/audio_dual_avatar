@@ -1,4 +1,0 @@
-Official demo repository: https://github.com/OpenBMB/MiniCPM-o-Demo
-Official demo commit: 47709a9210dfd71afa76c058e017fc8c4db5c8d2
-Model: openbmb/MiniCPM-o-4_5
-Packaged: 2026-10-27
