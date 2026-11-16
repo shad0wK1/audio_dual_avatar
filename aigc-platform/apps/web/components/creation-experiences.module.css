@@ -1,0 +1,76 @@
+.panel { width: min(1200px,100%); margin: 0 auto; padding-bottom: 30px; color: var(--ink); animation: reveal var(--ui-panel-duration,220ms) ease-out; }
+.sectionHeading { display: flex; align-items: flex-end; flex-wrap: wrap; justify-content: space-between; gap: 20px; margin: 12px 0 24px; }
+.panel h2 { margin: 8px 0 12px; font-size: clamp(22px,2.4vw,32px); letter-spacing: -.035em; line-height: 1.4; }
+.panel p { color: var(--ink-soft); font-size: 13px; line-height: 1.85; margin: 8px 0 0; }
+.eyebrow { color: var(--accent-deep); font-size: 11px; letter-spacing: .16em; }
+.availability { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--ink-soft); font-size: 12px; line-height: 1.6; }
+.statusDot { width: 6px; height: 6px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
+.statusDot[data-available='true'] { background: var(--success); }
+.availability button { display: inline-flex; gap: 5px; align-items: center; border: 0; background: transparent; color: var(--accent-deep); padding: 6px; cursor: pointer; }
+.roleGrid { display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); gap: 16px; }
+.roleCard { min-width: 0; border: 1px solid var(--ui-edge); border-radius: 22px; padding: 0; overflow: hidden; text-align: left; color: var(--ink); background: var(--ui-card); box-shadow: var(--ui-shadow); cursor: pointer; transition: transform 180ms ease, border-color 180ms ease, box-shadow 180ms ease; }
+.cover { position: relative; }
+.portrait { position: relative; overflow: hidden; background: #172039; }
+.portrait img { display: block; width: 100%; height: 100%; object-fit: cover; filter: hue-rotate(var(--role-hue)); }
+.cover .portrait { aspect-ratio: 4/4.6; }
+.cover::after { content: ''; position: absolute; inset: 50% 0 0; background: linear-gradient(transparent,#08112740); pointer-events: none; }
+.example { position: absolute; left: 12px; top: 12px; padding: 5px 8px; border: 1px solid #ffffff35; border-radius: 99px; background: #0c142abf; color: #eef3ff; font-size: 10px; backdrop-filter: blur(8px); }
+.roleBody { padding: 16px 14px; }
+.roleBody h3 { margin: 0; font-size: 14px; }
+.roleBody p { font-size: 11px; min-height: 38px; }
+.roleBody > div { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-top: 16px; }
+.roleBody > div > span:last-child { display: inline-flex; align-items: center; gap: 4px; font-size: 10px; color: var(--ink-soft); }
+.chip { border: 1px solid var(--ui-edge); border-radius: 99px; padding: 3px 7px; font-size: 10px; color: var(--accent-soft-ink); background: var(--accent-soft); }
+.panel .subheading { font-size: 21px; margin: 44px 0 20px; }
+.steps { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 16px; }
+.steps article { border: 1px solid var(--ui-edge); border-radius: 20px; background: var(--ui-card); padding: 24px; }
+.steps article > span { font-size: 11px; letter-spacing: .15em; color: var(--accent-deep); }
+.steps h3 { font-size: 16px; margin: 18px 0 8px; }
+.worldHero { display: grid; grid-template-columns: .7fr 1.3fr; align-items: center; gap: 32px; padding: 32px; border: 1px solid var(--ui-edge); border-radius: 28px; background: var(--ui-card); box-shadow: var(--ui-shadow); margin-bottom: 40px; }
+.worldCopy h2 { font-size: clamp(27px,3vw,42px); line-height: 1.5; margin-block: 22px; }
+.worldCopy > p { max-width: 320px; margin-bottom: 22px; }
+.note { display: block; color: var(--muted); font-size: 11px; line-height: 1.7; margin-top: 14px; }
+.film { position: relative; min-width: 0; border-radius: 20px; overflow: hidden; border: 1px solid #ffffff24; background: #080f1b; aspect-ratio: 16/9; }
+.film video { display: block; width: 100%; height: 100%; object-fit: contain; }
+.filmOverlay { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; background: #08112755; }
+.filmOverlay > p { color: #fff; padding: 0 14px; }
+.play { display: inline-flex; flex-direction: column; align-items: center; gap: 12px; border: 1px solid #ffffff55; background: #101c35cc; backdrop-filter: blur(12px); border-radius: 20px; padding: 22px 24px; color: #fff; font-size: 12px; cursor: pointer; }
+.filmBadge { position: absolute; left: 14px; top: 14px; padding: 4px 8px; border: 1px solid #ffffff30; border-radius: 8px; background: #081127b3; color: #fff; font-size: 10px; pointer-events: none; }
+.back { display: inline-flex; align-items: center; gap: 8px; padding: 10px 0; margin-top: 24px; background: transparent; color: var(--ink-soft); border: 0; cursor: pointer; font-size: 12px; }
+.dialogLayer { position: fixed; inset: 0; z-index: 210; display: grid; place-items: center; padding: 24px; color: var(--ink); }
+.backdrop { position: absolute; inset: 0; border: 0; background: #020817a6; backdrop-filter: blur(8px); }
+.dialog { position: relative; width: min(840px,100%); max-height: calc(100dvh - 48px); overflow-y: auto; overscroll-behavior: contain; border: 1px solid var(--ui-edge); border-radius: 26px; background: var(--ui-overlay); box-shadow: var(--shadow-modal); animation: reveal 220ms ease-out; }
+.dialog > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 22px 26px; border-bottom: 1px solid var(--line); }
+.dialog header h2 { margin: 6px 0 0; font-size: 20px; }
+.dialog header small { font-size: 11px; color: var(--muted); }
+.dialog header button { display: grid; place-items: center; width: 40px; height: 40px; flex-shrink: 0; border: 1px solid var(--line); border-radius: 50%; color: var(--ink); background: var(--surface-muted); cursor: pointer; }
+.detail { display: grid; grid-template-columns: .85fr 1.15fr; gap: 32px; padding: 26px; align-items: center; }
+.detail > .portrait { border-radius: 18px; aspect-ratio: 4/5; }
+.detail h3 { font-size: 20px; margin: 0 0 14px; }
+.detail p { color: var(--ink-soft); font-size: 13px; line-height: 1.9; }
+.starter { padding: 16px; border-radius: 14px; border: 1px solid var(--line); background: var(--surface-muted); margin-block: 22px; }
+.starter small { color: var(--muted); font-size: 11px; }
+.starter p { margin-bottom: 0; }
+.primary { display: inline-flex; align-items: center; justify-content: center; gap: 9px; min-height: 44px; padding: 10px 16px; border: 1px solid transparent; border-radius: 12px; background: var(--button-strong); color: var(--button-strong-text); font-size: 12px; cursor: pointer; }
+.detail .primary { margin-top: 20px; }
+.preparation { padding: 24px; }
+.stage { position: relative; display: grid; place-items: center; min-height: 280px; height: min(42dvh,380px); border: 1px solid var(--line); border-radius: 20px; overflow: hidden; background: radial-gradient(ellipse at top,#384578,#10192c 70%); }
+.stage > .portrait { position: absolute; inset: 0; background: transparent; opacity: .45; }
+.stage .portrait img { object-fit: contain; }
+.stageCopy { position: relative; display: grid; justify-items: center; gap: 14px; padding: 24px; text-align: center; color: #f4f6ff; background: #0c142db3; border: 1px solid #ffffff26; border-radius: 18px; backdrop-filter: blur(12px); }
+.stageCopy strong { font-size: 18px; }
+.stageCopy span { font-size: 12px; color: #d0daeb; }
+.callControls { display: flex; justify-content: center; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 22px; }
+.callControls > button:not(.primary) { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-width: 44px; min-height: 44px; padding: 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-muted); color: var(--ink); cursor: pointer; font-size: 12px; }
+.dialog button:disabled { color: var(--muted); background: var(--surface-muted); cursor: not-allowed; box-shadow: none; }
+.preparation .note { text-align: center; }
+.session { width: 100%; height: min(50dvh,420px); border: 0; border-radius: 18px; background: #0b1220; }
+.error { color: var(--danger); font-size: 12px; text-align: center; }
+.panel button:focus-visible, .dialog button:focus-visible, .film video:focus-visible { outline: 2px solid var(--accent-secondary); outline-offset: 3px; }
+@media (hover:hover) { .roleCard:hover { transform: translateY(-3px); border-color: var(--accent-secondary); box-shadow: var(--ui-shadow-raised); } }
+@keyframes reveal { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+@media (max-width:1200px) { .roleGrid { grid-template-columns: repeat(3,minmax(0,1fr)); } .worldHero { grid-template-columns: 1fr; gap: 24px; } .worldCopy h2 br { display: none; } .worldCopy > p { max-width: none; } }
+@media (max-width:767px) { .panel { padding-bottom: 60px; } .roleGrid { grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; } .roleBody { padding: 14px 12px; } .steps { grid-template-columns: 1fr; gap: 12px; } .steps article { padding: 20px; } .steps h3 { margin-top: 10px; } .worldHero { padding: 18px; border-radius: 22px; } .worldCopy h2 { margin-block: 14px; } .film { border-radius: 14px; } .play { padding: 12px; gap: 8px; font-size: 11px; } .dialogLayer { padding: 12px; } .dialog { max-height: calc(100dvh - 24px); border-radius: 20px; } .dialog > header { padding: 18px; } .detail { grid-template-columns: 1fr; gap: 22px; padding: 20px; } .detail > .portrait { max-height: 220px; aspect-ratio: 16/9; } .detail .portrait img { object-fit: contain; } .preparation { padding: 16px; } .stage { min-height: 220px; } .stageCopy { padding: 16px; margin: 12px; } }
+@media (max-width:360px) { .roleGrid { grid-template-columns: 1fr; } .cover .portrait { aspect-ratio: 4/3; } .roleBody p { min-height: 0; } .sectionHeading { gap: 12px; } }
+@media (prefers-reduced-motion:reduce) { .panel, .dialog { animation: none; } .roleCard { transition: none; transform: none !important; } }
+.avatarFrame { display: block; width: 100%; height: clamp(620px, 82dvh, 900px); border: 0; border-radius: 16px; margin-bottom: 24px; }

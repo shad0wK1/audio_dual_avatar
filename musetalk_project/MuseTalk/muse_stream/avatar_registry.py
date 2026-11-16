@@ -14,7 +14,7 @@ from typing import Any
 
 from .config import ROOT
 from .log import log
-from .models import cache_dir_for, load_cached_avatar
+from .models import cache_dir_for, load_cached_avatar, warmup_speech_features
 from .state import AppState
 
 
@@ -350,6 +350,10 @@ def activate_avatar(
             and state.model.avatar_id == target_id
             and state.model.avatar is not None
         ):
+            # Native /avatar activates its selection before opening the microphone,
+            # including when it reuses the current avatar after a long idle period.
+            if not state.model.avatar_leases and not state.viewer.connected and not state.stream_input.connected:
+                warmup_speech_features(runtime, args)
             return info
 
         previous_id = state.model.avatar_id

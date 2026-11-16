@@ -1,17 +1,10 @@
-import { AvatarPlayer, INTERRUPT_FLUSH_TIMEOUT_MS } from './avatar-player.js?v=bufferfix2';
+import { AvatarPlayer, INTERRUPT_FLUSH_TIMEOUT_MS } from './avatar-player.js?v=feature-recovery2';
 import { SpeechInterruptor } from './speech-interruptor.js?v=prompt2';
+import { AvatarSessionClient } from '../sdk/avatar-session-client.js?v=avatar-delete2';
 import { RealtimeSession } from '../duplex/lib/realtime-session.js';
 import { arrayBufferToBase64, resampleAudio } from '../duplex/lib/duplex-utils.js';
 
 const $ = (id) => document.getElementById(id);
-const PROMPT_STORAGE_KEY = 'prompt.knowledge.v1';
-const DEFAULT_PROMPT = '你叫阿萍，是一名专业、亲切的中文知识传播助手，面向普通大众进行准确、易懂、有温度的知识讲解。'
-    + '你的目标是帮助用户理解概念、建立知识框架，并能在生活或学习中应用。回答时：先准确理解问题，'
-    + '必要时用一句话澄清；默认使用自然、简洁的中文口语，先给核心结论，再分点解释，必要时使用类比或例子；'
-    + '根据用户背景控制专业术语密度，首次出现时进行解释；涉及事实、数据、研究或出处时说明确定性，不编造，'
-    + '不确定就明确说明并给出可靠的核查方向；对争议话题保持中立，呈现主要观点和依据；语音回答避免冗长和复杂格式，'
-    + '一般控制在几句话到一小段，用户要求时再深入展开；合适时可以给一个延伸问题或可执行的小建议，但不要机械追问。'
-    + '始终尊重用户，不传播歧视、仇恨、违法或危险内容。';
 const storage = {
     get(key, fallback = '') {
         try { return localStorage.getItem(`avatar.ui.${key}`) ?? fallback; } catch { return fallback; }
@@ -20,6 +13,10 @@ const storage = {
         try { localStorage.setItem(`avatar.ui.${key}`, String(value)); } catch { /* private browsing */ }
     },
 };
+const AVATAR_PRESET_STORAGE_KEY = 'avatarPreset';
+const AVATAR_OWNER_STORAGE_KEY = 'avatar.ownerId';
+const avatarVoiceRefs = new Map();
+const avatarOwnerId = getAvatarOwnerId();
 
 let session = null;
 let microphone = null;
@@ -36,22 +33,409 @@ let interruptor = null;
 let modelSpeaking = false;
 let awaitingListen = false;
 let interruptRecoveryTimer = null;
-let avatarVoiceRef = null;
+let avatarPresetSwitching = false;
+let avatarCustomizing = false;
+let avatarPresets = [];
+let avatarPresetsLoaded = false;
+let avatarPresetsError = '';
+let avatarPresetId = storage.get(AVATAR_PRESET_STORAGE_KEY, '');
 
-async function loadAvatarVoiceRef() {
-    if (avatarVoiceRef?.base64) return avatarVoiceRef;
-    const response = await fetch('/api/avatar_ref_audio', {
+function getAvatarOwnerId() {
+    try {
+        const existing = localStorage.getItem(AVATAR_OWNER_STORAGE_KEY) || '';
+        if (existing) return existing;
+        const value = globalThis.crypto?.randomUUID?.()
+            || `local_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+        localStorage.setItem(AVATAR_OWNER_STORAGE_KEY, value);
+        return value;
+    } catch {
+        return `session_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    }
+}
+
+function selectedAvatarPreset() {
+    return avatarPresets.find((preset) => preset.id === avatarPresetId) || null;
+}
+
+function avatarPresetById(id) {
+    return avatarPresets.find((preset) => preset.id === id) || null;
+}
+
+function promptDraftKey(preset) {
+    const revision = preset?.prompt?.sha256 || 'latest';
+    return `prompt.${preset?.id || 'none'}.${revision}`;
+}
+
+function showPresetPortrait(preset) {
+    const poster = $('avatarPoster');
+    if (!preset) {
+        poster.removeAttribute('src');
+        $('portraitName').textContent = '数字人';
+        return;
+    }
+    poster.alt = preset.name;
+    poster.src = '/static/avatar/portraits/' + encodeURIComponent(preset.avatar_id) + '.jpg';
+    $('portraitName').textContent = preset.name;
+}
+
+// Carry over drafts from the version immediately preceding the character rename.
+const renamedPrompts = {
+    '5da6264d65d6b631fbd8e0c5ae5ce08c2c88de4dfaef87492d7f6834d1be91e4': { oldHash: 'fa1ca17c839566613d9cb12b42ab2ad8dcc5e3a28199e5093eb0917e900c7cd7', oldName: '阿萍' },
+    '78d5c6d90b20afd99a62df4f99f4daa3eca59aefbe61cb4a9508a437a533468e': { oldHash: 'fce37e19d3d5ec1e59def2e310c58db08293aa153753b69f12908082a86e8d32', oldName: '小鹿' },
+};
+
+function applyPresetPrompt(preset) {
+    if (!preset?.prompt?.text) return;
+    const key = promptDraftKey(preset);
+    let draft = storage.get(key, null);
+    const previous = renamedPrompts[preset.prompt.sha256];
+    if (draft === null && previous) {
+        draft = storage.get(`prompt.${preset.id}.${previous.oldHash}`, null);
+        if (draft === null && preset.id === 'gril_v2') draft = storage.get('prompt.knowledge.v1', null);
+        const oldIntro = `你叫${previous.oldName}，`;
+        if (draft?.startsWith(oldIntro)) draft = `你叫${preset.name}，` + draft.slice(oldIntro.length);
+    }
+    $('systemPrompt').value = draft ?? preset.prompt.text;
+    updatePrompt();
+}
+
+async function loadAvatarVoiceRef(preset = selectedAvatarPreset()) {
+    if (!preset?.voice?.audio_url) {
+        throw new Error('当前形象没有可用的参考声线');
+    }
+    const cached = avatarVoiceRefs.get(preset.id);
+    if (cached?.name === preset.voice.name && cached?.base64) return cached;
+    const response = await fetch(preset.voice.audio_url, {
         signal: AbortSignal.timeout(10000),
+        cache: 'no-store',
+        headers: { 'X-Avatar-Owner-ID': avatarOwnerId },
     });
     if (!response.ok) {
-        throw new Error('默认声线参考加载失败');
+        throw new Error(`${preset.name}的参考声线加载失败`);
     }
     const data = await response.json();
     if (!data?.base64) {
-        throw new Error('默认声线参考为空');
+        throw new Error(`${preset.name}的参考声线为空`);
     }
-    avatarVoiceRef = data;
+    avatarVoiceRefs.set(preset.id, data);
     return data;
+}
+
+function setAvatarPresetStatus(text, state = '') {
+    const el = $('avatarPresetStatus');
+    if (!el) return;
+    el.textContent = text;
+    if (state) el.dataset.state = state;
+    else delete el.dataset.state;
+}
+
+function renderAvatarPresets() {
+    const busy = starting
+        || Boolean(session?.running)
+        || avatarPresetSwitching
+        || avatarCustomizing;
+    const grid = $('avatarPresetGrid');
+    grid.replaceChildren();
+    if (!avatarPresetsLoaded) {
+        const loading = document.createElement('span');
+        loading.className = 'avatar-preset-loading';
+        loading.textContent = avatarPresetsError || '正在加载形象预设…';
+        grid.append(loading);
+    } else if (avatarPresets.length === 0) {
+        const empty = document.createElement('span');
+        empty.className = 'avatar-preset-loading';
+        empty.textContent = '没有可用的形象预设';
+        grid.append(empty);
+    } else {
+        for (const preset of avatarPresets) {
+            const card = document.createElement('div');
+            card.className = 'avatar-preset-card';
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'avatar-preset';
+            button.dataset.presetId = preset.id;
+            button.setAttribute('role', 'radio');
+            button.setAttribute('aria-checked', String(preset.id === avatarPresetId));
+            button.setAttribute('aria-busy', String(avatarPresetSwitching));
+            button.classList.toggle('active', preset.id === avatarPresetId);
+            button.classList.toggle('unavailable', !preset.available);
+            button.disabled = busy || !preset.available;
+
+            const name = document.createElement('span');
+            name.className = 'avatar-preset-name';
+            name.textContent = preset.name;
+            const detail = document.createElement('span');
+            detail.className = 'avatar-preset-detail';
+            const dimensions = preset.cache
+                ? ` · ${preset.cache.width}×${preset.cache.height}`
+                : '';
+            const voice = preset.voice?.name ? ` · ${preset.voice.name}` : '';
+            detail.textContent = `${preset.description || preset.avatar_id}${dimensions}${voice}`;
+            button.append(name, detail);
+            if (!preset.available && preset.error) {
+                const error = document.createElement('span');
+                error.className = 'avatar-preset-error';
+                error.textContent = preset.error;
+                button.append(error);
+            }
+            button.addEventListener('click', () => selectAvatarPreset(preset.id));
+            card.append(button);
+            if (preset.deletable) {
+                const remove = document.createElement('button');
+                remove.type = 'button';
+                remove.className = 'avatar-preset-delete';
+                remove.textContent = '删除';
+                remove.title = `删除自建形象：${preset.name}`;
+                remove.setAttribute(
+                    'aria-label',
+                    `删除自建形象：${preset.name}`,
+                );
+                remove.disabled = busy;
+                remove.addEventListener('click', (event) => {
+                    event.stopPropagation();
+                    deleteAvatarPreset(preset);
+                });
+                card.append(remove);
+            }
+            grid.append(card);
+        }
+    }
+    $('btnRefreshAvatars').disabled = busy;
+}
+
+
+async function deleteAvatarPreset(preset) {
+    if (
+        starting
+        || avatarPresetSwitching
+        || avatarCustomizing
+        || session?.running
+    ) {
+        return;
+    }
+    if (!window.confirm(`确认删除自建形象“${preset.name}”？该操作不可撤销。`)) {
+        return;
+    }
+    const switchToDefault = Boolean(preset.active);
+    if (
+        switchToDefault
+        && !window.confirm(
+            `该形象当前处于活跃状态。删除后将自动切换为系统默认形象。`
+            + `确认继续删除“${preset.name}”？`,
+        )
+    ) {
+        return;
+    }
+    avatarPresetSwitching = true;
+    setAvatarPresetStatus(
+        switchToDefault ? '正在切换默认形象…' : '正在删除…',
+    );
+    updateControls();
+    try {
+        const response = await fetch(
+            `/avatar-live/api/avatar-presets/${encodeURIComponent(preset.id)}`
+                + (switchToDefault ? '?switch_to_default=true' : ''),
+            {
+                method: 'DELETE',
+                headers: { 'X-Avatar-Owner-ID': avatarOwnerId },
+                signal: AbortSignal.timeout(60000),
+            },
+        );
+        let data = null;
+        try {
+            data = await response.json();
+        } catch {
+            // Keep the HTTP status as the error message.
+        }
+        if (!response.ok) {
+            const detail = data?.detail;
+            const message = typeof detail === 'object'
+                ? detail?.message
+                : detail;
+            throw new Error(message || `HTTP ${response.status}`);
+        }
+        avatarVoiceRefs.delete(preset.id);
+        if (avatarPresetId === preset.id) {
+            avatarPresetId = '';
+            storage.set(AVATAR_PRESET_STORAGE_KEY, '');
+        }
+        await loadAvatarPresets();
+        setAvatarPresetStatus('已删除');
+        hint(`已删除自建形象：${preset.name}`);
+    } catch (error) {
+        console.error(error);
+        setAvatarPresetStatus('删除失败', 'error');
+        hint(error.message || '删除形象失败', true);
+    } finally {
+        avatarPresetSwitching = false;
+        updateControls();
+    }
+}
+
+
+async function loadAvatarPresets() {
+    try {
+        const response = await fetch('/avatar-live/api/avatar-presets', {
+            signal: AbortSignal.timeout(15000),
+            cache: 'no-store',
+            headers: { 'X-Avatar-Owner-ID': avatarOwnerId },
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        avatarPresets = Array.isArray(data.presets) ? data.presets : [];
+        const available = avatarPresets.filter((preset) => preset.available);
+        const saved = storage.get(AVATAR_PRESET_STORAGE_KEY, '');
+        if (available.some((preset) => preset.id === saved)) {
+            avatarPresetId = saved;
+        } else if (available.some((preset) => preset.id === data.default_preset_id)) {
+            avatarPresetId = data.default_preset_id;
+        } else {
+            avatarPresetId = available[0]?.id || avatarPresets[0]?.id || '';
+        }
+        storage.set(AVATAR_PRESET_STORAGE_KEY, avatarPresetId);
+        avatarPresetsLoaded = true;
+        avatarPresetsError = '';
+        const preset = selectedAvatarPreset();
+        showPresetPortrait(preset);
+        if (preset) applyPresetPrompt(preset);
+        const active = preset && preset.avatar_id === data.active_avatar_id;
+        setAvatarPresetStatus(
+            active ? '已激活' : `${available.length} 个可用`,
+            available.length ? 'ready' : 'error',
+        );
+    } catch (error) {
+        avatarPresetsError = error.message || '形象预设加载失败';
+        setAvatarPresetStatus('加载失败', 'error');
+    } finally {
+        renderAvatarPresets();
+        updateControls();
+    }
+}
+
+async function selectAvatarPreset(id) {
+    const preset = avatarPresetById(id);
+    if (!preset?.available || starting || session?.running || avatarPresetSwitching) return;
+    avatarPresetSwitching = true;
+    updateControls();
+    setAvatarPresetStatus('切换中…');
+    hint(`正在切换为${preset.name}…`);
+    try {
+        const response = await fetch(`/avatar-live/api/avatar-presets/${encodeURIComponent(id)}/activate`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-Avatar-Owner-ID': avatarOwnerId,
+            },
+            signal: AbortSignal.timeout(60000),
+        });
+        let data = null;
+        try { data = await response.json(); } catch { /* keep fallback text */ }
+        if (!response.ok) {
+            throw new Error(data?.detail?.message || data?.message || '形象切换失败');
+        }
+        avatarPresetId = preset.id;
+        storage.set(AVATAR_PRESET_STORAGE_KEY, avatarPresetId);
+        const updated = {
+            ...preset,
+            ...data,
+            available: true,
+            error: null,
+        };
+        avatarPresets = avatarPresets.map((item) => item.id === id ? updated : item);
+        showPresetPortrait(updated);
+        applyPresetPrompt(updated);
+        renderAvatarPresets();
+        setAvatarPresetStatus(`已切换 · ${updated.cache?.width || data.width}×${updated.cache?.height || data.height}`, 'ready');
+        hint(`${preset.name}已激活，提示词和声线已同步`);
+        try {
+            const voice = await loadAvatarVoiceRef(updated);
+            hint(`${preset.name}已激活 · ${voice.name}`);
+        } catch (error) {
+            setAvatarPresetStatus('声线加载失败', 'error');
+            hint(error.message, true);
+        }
+    } catch (error) {
+        setAvatarPresetStatus('切换失败', 'error');
+        hint(error.message || '形象切换失败', true);
+    } finally {
+        avatarPresetSwitching = false;
+        updateControls();
+    }
+}
+
+function setCustomAvatarStatus(text, state = '') {
+    const element = $('customAvatarStatus');
+    element.textContent = text;
+    if (state) element.dataset.state = state;
+    else delete element.dataset.state;
+}
+
+async function createCustomAvatar(event) {
+    event.preventDefault();
+    const video = $('customVideo').files[0];
+    const audio = $('customAudio').files[0];
+    const name = $('customAvatarName').value.trim();
+    const description = $('customAvatarDescription').value.trim();
+    const prompt = $('systemPrompt').value.trim();
+    if (!video || !audio || !name || !prompt) {
+        hint('请填写名称和提示词，并选择视频与参考音频', true);
+        return;
+    }
+    $('btnCreateAvatar').disabled = true;
+    $('customAvatarProgress').hidden = false;
+    $('customAvatarProgress').value = 0;
+    $('customAvatarHint').textContent = '正在上传素材…';
+    setCustomAvatarStatus('上传中');
+    avatarCustomizing = true;
+    updateControls();
+    try {
+        const job = await AvatarSessionClient.createCustomization({
+            baseUrl: location.origin,
+            apiPrefix: '/v1/avatar',
+            ownerId: avatarOwnerId,
+            video,
+            audio,
+            prompt,
+            name,
+            description,
+            onProgress: (ratio) => {
+                $('customAvatarProgress').value = Math.round(ratio * 12);
+                $('customAvatarHint').textContent = `上传中 ${Math.round(ratio * 100)}%`;
+            },
+        });
+        let current = job;
+        while (!['ready', 'failed', 'cancelled'].includes(current.status)) {
+            await new Promise((resolve) => setTimeout(resolve, 1500));
+            current = await AvatarSessionClient.getCustomization({
+                baseUrl: location.origin,
+                apiPrefix: '/v1/avatar',
+                ownerId: avatarOwnerId,
+                jobId: job.job_id,
+            });
+            $('customAvatarProgress').value = current.progress || 0;
+            $('customAvatarHint').textContent = `${current.stage || current.status} · ${current.progress || 0}%`;
+            setCustomAvatarStatus(current.status === 'processing' ? '生成中' : current.status);
+        }
+        if (current.status !== 'ready') {
+            throw new Error(current.error || '形象生成失败');
+        }
+        $('customAvatarProgress').value = 100;
+        $('customAvatarHint').textContent = '生成完成，请在上方选择新形象';
+        setCustomAvatarStatus('已完成', 'ready');
+        await loadAvatarPresets();
+        if (current.preset_id) {
+            avatarPresetId = current.preset_id;
+            storage.set(AVATAR_PRESET_STORAGE_KEY, avatarPresetId);
+            renderAvatarPresets();
+        }
+    } catch (error) {
+        console.error(error);
+        setCustomAvatarStatus('失败', 'error');
+        $('customAvatarHint').textContent = error.message || '形象生成失败';
+    } finally {
+        avatarCustomizing = false;
+        updateControls();
+    }
 }
 
 function hint(text, error = false) {
@@ -60,15 +444,32 @@ function hint(text, error = false) {
 }
 
 function updateControls() {
-    const busy = starting || Boolean(session?.running);
-    $('btnStart').disabled = busy || !healthy;
+    const sessionBusy = starting
+        || avatarPresetSwitching
+        || Boolean(session?.running);
+    const busy = sessionBusy || avatarCustomizing;
+    const preset = selectedAvatarPreset();
+    const ready = avatarPresetsLoaded
+        && Boolean(preset?.available)
+        && Boolean($('systemPrompt').value.trim());
+    $('btnStart').disabled = busy || !healthy || !ready;
     $('btnStart').lastChild.textContent = starting ? ' 正在连接…' : ' 开始对话';
-    $('btnStop').disabled = !busy;
+    $('btnStop').disabled = !sessionBusy;
     $('btnMute').disabled = !session?.running;
     $('btnInterrupt').disabled = !session?.running;
     for (const id of ['systemPrompt', 'btnResetPrompt', 'micDevice', 'echoCancellation', 'btnRefreshDevices']) {
+        $(id).disabled = busy || !avatarPresetsLoaded;
+    }
+    for (const id of [
+        'customVideo',
+        'customAudio',
+        'customAvatarName',
+        'customAvatarDescription',
+        'btnCreateAvatar',
+    ]) {
         $(id).disabled = busy;
     }
+    renderAvatarPresets();
     document.querySelector('.portrait-card').dataset.state = session?.running ? 'running' : 'idle';
     document.querySelector('.conversation-footer').dataset.state = session?.running ? 'running' : 'idle';
 }
@@ -285,6 +686,8 @@ function cleanup(owner) {
     microphone = null;
     const oldPlayer = player;
     oldPlayer?.close();
+    const canvas = $('avatarCanvas');
+    canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
     oldPlayer?.ctx?.close().catch(() => {});
     player = null;
     session = null;
@@ -376,13 +779,16 @@ async function start() {
         updateControls();
     };
     try {
+        const preset = selectedAvatarPreset();
+        if (!preset?.available || !preset.prompt?.text) {
+            throw new Error('请先选择可用的数字人形象');
+        }
         const [avatarResponse, voiceRef] = await Promise.all([
-            fetch('/avatar-live/api/avatar/select', {
+            fetch(`/avatar-live/api/avatar-presets/${encodeURIComponent(preset.id)}/activate`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: '{}',
+                signal: AbortSignal.timeout(60000),
             }),
-            loadAvatarVoiceRef(),
+            loadAvatarVoiceRef(preset),
         ]);
         if (!avatarResponse.ok) {
             let message = '数字人形象准备失败';
@@ -392,6 +798,8 @@ async function start() {
             } catch { /* keep generic message */ }
             throw new Error(message);
         }
+        setAvatarPresetStatus('已激活', 'ready');
+        renderAvatarPresets();
         if (currentAttempt !== attempt) return;
         player = new AvatarPlayer({
             canvas: $('avatarCanvas'),
@@ -426,9 +834,12 @@ async function start() {
             return;
         }
         const customPrompt = $('systemPrompt').value.trim();
+        if (!customPrompt) {
+            throw new Error('系统提示词为空');
+        }
         const prompt = customPrompt.startsWith('Streaming')
             ? customPrompt
-            : `Streaming Audio Conversation. ${customPrompt || DEFAULT_PROMPT}`;
+            : `Streaming Audio Conversation. ${customPrompt}`;
         await owner.start(
             prompt,
             {
@@ -522,19 +933,21 @@ async function checkHealth() {
 
 function updatePrompt() {
     $('promptCount').textContent = `${$('systemPrompt').value.length} 字`;
-    storage.set(PROMPT_STORAGE_KEY, $('systemPrompt').value);
+    const preset = selectedAvatarPreset();
+    if (preset?.prompt) {
+        storage.set(promptDraftKey(preset), $('systemPrompt').value);
+    }
+    updateControls();
 }
 
-const savedPrompt = storage.get(PROMPT_STORAGE_KEY, null);
-// Migrate only the previous shipped default; keep custom prompts unchanged.
-const previousDefaultPrompt = DEFAULT_PROMPT.replace('你叫阿萍，是一名', '你是一名');
-const useCurrentDefault = savedPrompt === null || savedPrompt === previousDefaultPrompt;
-$('systemPrompt').value = useCurrentDefault ? DEFAULT_PROMPT : savedPrompt;
-if (useCurrentDefault) storage.set(PROMPT_STORAGE_KEY, DEFAULT_PROMPT);
+$('systemPrompt').value = '';
 $('systemPrompt').addEventListener('input', updatePrompt);
 $('btnResetPrompt').addEventListener('click', () => {
-    $('systemPrompt').value = DEFAULT_PROMPT;
+    const preset = selectedAvatarPreset();
+    if (!preset?.prompt?.text) return;
+    $('systemPrompt').value = preset.prompt.text;
     updatePrompt();
+    hint(`已恢复${preset.name}的默认提示词`);
 });
 $('volume').value = storage.get('volume', '80');
 function updateVolume() {
@@ -554,6 +967,11 @@ $('btnRefreshDevices').addEventListener('click', () => {
         .then(() => hint('音频设备已刷新'))
         .catch(() => hint('请允许麦克风权限后重试', true));
 });
+$('btnRefreshAvatars').addEventListener('click', () => {
+    setAvatarPresetStatus('检查中…');
+    loadAvatarPresets();
+});
+$('avatarCreateForm').addEventListener('submit', createCustomAvatar);
 $('btnStart').addEventListener('click', start);
 $('btnStop').addEventListener('click', stop);
 $('btnInterrupt').addEventListener('click', () => interruptor?.trigger());
@@ -583,5 +1001,6 @@ updatePrompt();
 updateVolume();
 updateControls();
 enumerateDevices().catch(() => {});
+loadAvatarPresets();
 checkHealth();
 setInterval(checkHealth, 10000);

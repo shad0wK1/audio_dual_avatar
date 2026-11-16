@@ -31,27 +31,27 @@ def _state() -> AppState:
     )
     state.service.ready = True
     state.model.runtime = SimpleNamespace()
-    state.model.default_avatar_id = "knowledge_host_720p"
+    state.model.default_avatar_id = "gril_v2"
     return state
 
 
 def test_existing_local_avatar_caches_are_discoverable() -> None:
-    _require_cache("knowledge_host_720p")
+    _require_cache("gril_v2")
     _require_cache("musetalk_test_avatar")
 
-    caches = list_avatar_caches("v15", "knowledge_host_720p")
+    caches = list_avatar_caches("v15", "gril_v2")
     by_id = {cache.id: cache for cache in caches}
 
-    assert by_id["knowledge_host_720p"].valid
-    assert by_id["knowledge_host_720p"].width == 768
-    assert by_id["knowledge_host_720p"].height == 1344
-    assert by_id["knowledge_host_720p"].frame_count == 690
+    assert by_id["gril_v2"].valid
+    assert by_id["gril_v2"].width == 768
+    assert by_id["gril_v2"].height == 1344
+    assert by_id["gril_v2"].frame_count == 690
 
     assert by_id["musetalk_test_avatar"].valid
     assert by_id["musetalk_test_avatar"].width == 480
     assert by_id["musetalk_test_avatar"].height == 864
     assert by_id["musetalk_test_avatar"].frame_count == 690
-    assert caches[0].id == "knowledge_host_720p"
+    assert caches[0].id == "gril_v2"
 
 
 def test_unknown_cache_is_reported_invalid() -> None:
@@ -61,7 +61,7 @@ def test_unknown_cache_is_reported_invalid() -> None:
 
 
 def test_activation_uses_named_cache_and_default_fallback(monkeypatch) -> None:
-    _require_cache("knowledge_host_720p")
+    _require_cache("gril_v2")
     _require_cache("musetalk_test_avatar")
     state = _state()
     loaded: list[str] = []
@@ -83,18 +83,18 @@ def test_activation_uses_named_cache_and_default_fallback(monkeypatch) -> None:
     assert (state.model.width, state.model.height) == (480, 864)
 
     selected = activate_avatar(state, None)
-    assert selected.id == "knowledge_host_720p"
-    assert state.model.avatar_id == "knowledge_host_720p"
+    assert selected.id == "gril_v2"
+    assert state.model.avatar_id == "gril_v2"
     assert state.model.avatar_revision == 2
     assert (state.model.width, state.model.height) == (768, 1344)
-    assert loaded == ["musetalk_test_avatar", "knowledge_host_720p"]
+    assert loaded == ["musetalk_test_avatar", "gril_v2"]
 
 
 def test_activation_rejects_switch_while_viewer_is_connected(monkeypatch) -> None:
-    _require_cache("knowledge_host_720p")
+    _require_cache("gril_v2")
     _require_cache("musetalk_test_avatar")
     state = _state()
-    state.model.avatar_id = "knowledge_host_720p"
+    state.model.avatar_id = "gril_v2"
     state.model.avatar = SimpleNamespace(
         frame_list_cycle=[np.zeros((1344, 768, 3), dtype=np.uint8)]
     )
@@ -109,13 +109,13 @@ def test_activation_rejects_switch_while_viewer_is_connected(monkeypatch) -> Non
     with pytest.raises(AvatarBusyError):
         activate_avatar(state, "musetalk_test_avatar")
 
-    assert state.model.avatar_id == "knowledge_host_720p"
+    assert state.model.avatar_id == "gril_v2"
 
 
 def test_same_avatar_is_idempotent_even_with_viewer(monkeypatch) -> None:
-    _require_cache("knowledge_host_720p")
+    _require_cache("gril_v2")
     state = _state()
-    state.model.avatar_id = "knowledge_host_720p"
+    state.model.avatar_id = "gril_v2"
     state.model.avatar = SimpleNamespace(
         frame_list_cycle=[np.zeros((1344, 768, 3), dtype=np.uint8)]
     )
@@ -128,16 +128,16 @@ def test_same_avatar_is_idempotent_even_with_viewer(monkeypatch) -> None:
         lambda *args: pytest.fail("same avatar must not be reloaded"),
     )
 
-    info = activate_avatar(state, "knowledge_host_720p")
+    info = activate_avatar(state, "gril_v2")
     assert info.valid
     assert state.model.avatar_revision == 7
 
 
 def test_avatar_http_api_lists_and_selects_cache(monkeypatch) -> None:
-    _require_cache("knowledge_host_720p")
+    _require_cache("gril_v2")
     _require_cache("musetalk_test_avatar")
     state = _state()
-    state.model.avatar_id = "knowledge_host_720p"
+    state.model.avatar_id = "gril_v2"
     state.model.avatar = SimpleNamespace(
         frame_list_cycle=[np.zeros((1344, 768, 3), dtype=np.uint8)]
     )
@@ -162,9 +162,9 @@ def test_avatar_http_api_lists_and_selects_cache(monkeypatch) -> None:
     listed = client.get("/api/avatars")
     assert listed.status_code == 200
     payload = listed.json()
-    assert payload["default_avatar_id"] == "knowledge_host_720p"
+    assert payload["default_avatar_id"] == "gril_v2"
     assert {item["id"] for item in payload["avatars"]} >= {
-        "knowledge_host_720p",
+        "gril_v2",
         "musetalk_test_avatar",
     }
 
@@ -179,7 +179,7 @@ def test_avatar_http_api_lists_and_selects_cache(monkeypatch) -> None:
 
     restored = client.post("/api/avatar/select")
     assert restored.status_code == 200
-    assert restored.json()["active_avatar_id"] == "knowledge_host_720p"
+    assert restored.json()["active_avatar_id"] == "gril_v2"
     assert restored.json()["width"] == 768
 
     missing = client.post(
@@ -192,7 +192,7 @@ def test_avatar_http_api_lists_and_selects_cache(monkeypatch) -> None:
 
 def test_failed_activation_rolls_back_previous_avatar(monkeypatch) -> None:
     state = _state()
-    state.model.avatar_id = "knowledge_host_720p"
+    state.model.avatar_id = "gril_v2"
     state.model.avatar = SimpleNamespace(
         frame_list_cycle=[np.zeros((1344, 768, 3), dtype=np.uint8)]
     )
@@ -228,6 +228,6 @@ def test_failed_activation_rolls_back_previous_avatar(monkeypatch) -> None:
     with pytest.raises(AvatarActivationError):
         activate_avatar(state, "broken_avatar")
 
-    assert state.model.avatar_id == "knowledge_host_720p"
+    assert state.model.avatar_id == "gril_v2"
     assert state.model.avatar_ready
     assert state.model.avatar_revision == 3

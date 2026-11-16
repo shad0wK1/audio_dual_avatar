@@ -79,3 +79,19 @@ def test_mth1_keyframe_flag_is_supported_by_replay_cache():
     packet[6] = 1
     session._remember_video_packet(bytes(packet))
     assert session.replay_packets == [bytes(packet)]
+
+
+
+def test_targeted_replay_only_when_missing_frame_is_in_the_cache():
+    from muse_stream.protocol import pack_h264_frame
+    state = AppState()
+    session = LiveStreamSession(state, SimpleNamespace(query_params={}))
+    frames = [pack_h264_frame(1, 3 if i < 5 else 4, i * 41667, i,
+                              b"video", keyframe=i in (0, 4, 8)) for i in range(10)]
+    for frame in frames:
+        session._remember_video_packet(frame)
+    for target in ((5, 12), (3, 7), (4, 11)):
+        session.resync_target = target
+        assert session._packets_for_resync() == []
+    session.resync_target = (4, 6)
+    assert session._packets_for_resync() == frames[4:]  # include dependencies and the live decoder tail

@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Avatar Session API Demo</title>
+    <style>
+        :root { color-scheme: dark; font-family: Inter, "PingFang SC", sans-serif; }
+        * { box-sizing: border-box; }
+        body { margin: 0; background: #10141d; color: #eef2ff; }
+        main { max-width: 1080px; margin: 0 auto; padding: 24px; }
+        header { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+        h1 { margin: 0; font-size: 24px; }
+        .status { color: #8ea0c4; font-size: 14px; }
+        .layout { display: grid; grid-template-columns: minmax(280px, 420px) 1fr; gap: 20px; margin-top: 20px; }
+        .stage { background: #070a10; border-radius: 18px; overflow: hidden; aspect-ratio: 9 / 16; }
+        canvas { display: block; width: 100%; height: 100%; object-fit: contain; background: #070a10; }
+        .panel { background: #171d29; border-radius: 16px; padding: 18px; }
+        label { display: grid; gap: 6px; color: #aebbd4; font-size: 14px; }
+        select, button { font: inherit; }
+        select { width: 100%; padding: 10px; border-radius: 10px; border: 1px solid #34415b; background: #0e131d; color: inherit; }
+        .buttons { display: flex; flex-wrap: wrap; gap: 10px; margin: 16px 0; }
+        button { padding: 10px 16px; border-radius: 10px; border: 0; background: #5267ff; color: white; cursor: pointer; }
+        button.secondary { background: #293349; }
+        button:disabled { opacity: .45; cursor: default; }
+        .hint { color: #8ea0c4; line-height: 1.5; }
+        .transcript { height: 420px; overflow: auto; margin-top: 14px; display: grid; align-content: start; gap: 10px; }
+        .message { padding: 12px; border-radius: 10px; background: #0e131d; line-height: 1.55; white-space: pre-wrap; }
+        .message.assistant { border-left: 3px solid #5267ff; }
+        details { margin-bottom: 16px; }
+        summary { cursor: pointer; font-weight: 600; }
+        .create-form { display: grid; gap: 10px; margin-top: 12px; }
+        .create-form input, .create-form textarea { width: 100%; padding: 9px 10px; border: 1px solid #34415b; border-radius: 8px; background: #0b1018; color: inherit; }
+        .create-form textarea { min-height: 90px; resize: vertical; }
+        .create-form progress { width: 100%; accent-color: #5267ff; }
+        .create-hint { color: #8ea0c4; font-size: 12px; }
+        @media (max-width: 760px) {
+            .layout { grid-template-columns: 1fr; }
+            .stage { max-height: 65vh; }
+        }
+    </style>
+</head>
+<body>
+<main>
+    <header>
+        <div>
+            <h1>Avatar Session API</h1>
+            <div class="hint">一个 REST 会话 + 一个 WebSocket 数据通道</div>
+        </div>
+        <span class="status" id="status">未连接</span>
+    </header>
+    <div class="layout">
+        <section class="stage">
+            <canvas id="avatarCanvas" width="768" height="1344" aria-label="数字人画面"></canvas>
+        </section>
+        <section class="panel">
+            <details>
+                <summary>创建我的数字人形象</summary>
+                <form class="create-form" id="createForm">
+                    <label>形象视频（最长 20 秒）<input id="customVideo" type="file" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm" required></label>
+                    <label>参考音频（最长 20 秒）<input id="customAudio" type="file" accept="audio/wav,audio/mpeg,audio/mp4,audio/flac,audio/ogg,.wav,.mp3,.m4a,.flac,.ogg" required></label>
+                    <label>形象名称<input id="customName" type="text" maxlength="80" required></label>
+                    <label>形象说明<input id="customDescription" type="text" maxlength="300"></label>
+                    <label>提示词<textarea id="customPrompt" required></textarea></label>
+                    <button id="createButton" type="submit">上传并生成</button>
+                    <progress id="createProgress" max="100" value="0" hidden></progress>
+                    <span class="create-hint" id="createHint">视频和音频均不超过 20 秒</span>
+                </form>
+            </details>
+            <label>
+                麦克风设备
+                <select id="micDevice"></select>
+            </label>
+            <label>会话 API Key
+                <input id="apiKey" type="password" autocomplete="off" placeholder="输入后加载预设">
+            </label>
+            <label>
+                数字人预设
+                <select id="preset"></select>
+            </label>
+            <button id="deletePreset" class="secondary" type="button" hidden>
+                删除当前自建形象
+            </button>
+            <div class="buttons">
+                <button id="start">开始会话</button>
+                <button id="interrupt" class="secondary" disabled>打断</button>
+                <button id="mute" class="secondary" disabled>静音</button>
+                <button id="stop" class="secondary" disabled>结束</button>
+                <button id="refreshDevices" class="secondary">刷新麦克风</button>
+            </div>
+            <div class="hint" id="hint">点击开始后，浏览器只连接创建的单个会话 WebSocket。</div>
+            <div class="transcript" id="transcript" role="log" aria-live="polite"></div>
+        </section>
+    </div>
+</main>
+<script type="module" src="/static/avatar-v2/app.js?v=avatar-delete2"></script>
+</body>
+</html>

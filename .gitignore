@@ -65,3 +65,11 @@ minicpm_demo/docs-app/.next/
 minicpm_demo/docs-app/.source/
 minicpm_demo/docs-app/out/
 minicpm_demo/static/mobile/
+
+# Local platform deployment
+.venv-preprocess/
+.cache-repair/
+.runtime/
+.next/
+.env.production.local
+*.pid

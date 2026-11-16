@@ -91,16 +91,15 @@ def build_runtime(args: Namespace) -> Runtime:
         timesteps=timesteps,
         weight_dtype=weight_dtype,
     )
-    warmup(runtime, args.batch_size)
+    warmup(runtime, args)
     return runtime
 
 
-def warmup(runtime: Runtime, batch_size: int) -> None:
+def warmup(runtime: Runtime, args: Namespace) -> None:
     """Warm up CUDA kernels so the first streamed batch is not delayed."""
     import torch
-    import tempfile
-    import wave
 
+    batch_size = args.batch_size
     log(f"warming up UNet / VAE / Whisper (batch={batch_size})")
     with torch.no_grad():
         latents = torch.zeros(
@@ -119,26 +118,57 @@ def warmup(runtime: Runtime, batch_size: int) -> None:
         ).sample
         runtime.vae.decode_latents(pred)
 
-        mel = torch.zeros(
-            (1, 80, 3000), device=runtime.device, dtype=runtime.weight_dtype
-        )
-        runtime.whisper.encoder(mel, output_hidden_states=True)
-
-        # Exercise the file/CPU extractor too; warming only a synthetic mel
-        # leaves its first real reply paying library initialization costs.
-        with tempfile.TemporaryDirectory(prefix="avatar-audio-warmup-") as folder:
-            wav_path = str(Path(folder) / "silence.wav")
-            with wave.open(wav_path, "wb") as wav:
-                wav.setnchannels(1)
-                wav.setsampwidth(2)
-                wav.setframerate(16000)
-                wav.writeframes(bytes(32000))
-            runtime.audio_processor.get_audio_feature(
-                wav_path, weight_dtype=runtime.weight_dtype,
-            )
-
     if torch.cuda.is_available():
         torch.cuda.synchronize(runtime.device)
+    warmup_speech_features(runtime, args)
+
+
+def warmup_speech_features(runtime: Runtime, args: Namespace) -> None:
+    import tempfile
+    import wave
+
+    with tempfile.TemporaryDirectory(prefix="avatar-audio-warmup-") as folder:
+        wav_path = Path(folder) / "silence.wav"
+        with wave.open(str(wav_path), "wb") as wav:
+            wav.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+            wav.writeframes(bytes(32000))
+        _, mel_ms, whisper_ms = stream_audio_features(runtime, args, wav_path)
+        log(f"speech features ready: mel_ms={mel_ms:.1f} whisper_ms={whisper_ms:.1f}")
+
+
+def stream_audio_features(runtime: Runtime, args: Namespace, wav_path: Path):
+    # CUDA library state and FFT plans can be thread-local. Viewer threads
+    # come and go; prime and serve the feature path on the same runtime worker.
+    return runtime.feature_worker.submit(_extract_stream_features, runtime, args, wav_path).result()
+
+
+def _extract_stream_features(runtime: Runtime, args: Namespace, wav_path: Path):
+    import time
+    import soundfile as sf
+    import torch
+
+    processor = runtime.audio_processor
+    started = time.monotonic()
+    with torch.inference_mode():
+        # SegmentManager writes mono 16 kHz WAVs for both streamed and imported audio.
+        with sf.SoundFile(wav_path) as wav:
+            if wav.samplerate == 16000 and wav.channels == 1:
+                samples = wav.read(dtype="float32")
+            else:
+                import librosa
+                samples, _ = librosa.load(str(wav_path), sr=16000, mono=True)
+        mel, length = processor.features_from_samples(samples, runtime.weight_dtype, runtime.device)
+        extracted = time.monotonic()
+        chunks = processor.get_whisper_chunk(
+            mel, runtime.device, runtime.weight_dtype, runtime.whisper, length,
+            fps=args.fps, audio_padding_length_left=args.audio_padding_length_left,
+            audio_padding_length_right=args.audio_padding_length_right,
+            feature_window_mode=args.feature_window_mode,
+            feature_window_left=args.feature_window_left, feature_window_right=args.feature_window_right,
+        )
+        if runtime.device.type == "cuda":
+            torch.cuda.synchronize(runtime.device)
+    return chunks, (extracted - started) * 1000, (time.monotonic() - extracted) * 1000
 
 
 def build_avatar(
@@ -217,13 +247,13 @@ def load_cached_avatar(
     video_path = str(avatar_info.get("video_path", ""))
     bbox_shift = 0 if args.version == "v15" else int(args.bbox_shift)
     log(f"loading cached avatar: {cache_dir}")
-    return _instantiate_avatar(
-        args,
-        avatar_id=avatar_id,
-        video_path=video_path,
-        bbox_shift=bbox_shift,
-        preparation=False,
+    avatar = _instantiate_avatar(
+        args, avatar_id=avatar_id, video_path=video_path, bbox_shift=bbox_shift, preparation=False,
     )
+    # Complete the first audio-to-video inference warmup while the switch
+    # still owns the avatar lock and before clients see avatar_ready.
+    warmup(runtime, args)
+    return avatar
 
 
 def _configure_avatar_runtime(args: Namespace, runtime: Runtime) -> None:

@@ -1,0 +1,20 @@
+# Place inside the platform's existing HTTPS server block.
+# Keep the slash on /digital-human/; it makes relative static URLs work.
+location = /digital-human { return 308 /digital-human/; }
+location /digital-human/ {
+    proxy_pass http://127.0.0.1:18080/;
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 650s;
+    proxy_send_timeout 650s;
+    proxy_buffering off;
+    client_max_body_size 64k;
+    # Apply the platform's existing login and tenant authorization here.
+}
+# Launch BFF with:
+# python -m uvicorn app:app --host 127.0.0.1 --port 18080 \
+#     --root-path /digital-human --ws-max-size 16777216 --no-access-log

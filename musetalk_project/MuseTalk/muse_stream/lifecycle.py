@@ -47,7 +47,7 @@ def initialize(state: AppState) -> None:
         # inference policy and warm up again after all preparation imports.
         import torch
         torch.backends.cudnn.benchmark = False
-        warmup(runtime, args.batch_size)
+        warmup(runtime, args)
         if state.model.avatar.frame_list_cycle:
             frame = state.model.avatar.frame_list_cycle[0]
             state.model.height, state.model.width = frame.shape[:2]

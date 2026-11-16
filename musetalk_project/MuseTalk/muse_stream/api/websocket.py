@@ -44,6 +44,7 @@ class LiveStreamSession:
         self.replay_packets: list[bytes] = []
         self.replay_bytes = 0
         self.resync_requested = False
+        self.resync_target: tuple[int, int] | None = None
         self.last_resync_at = -float("inf")
         default_format = os.environ.get("AVATAR_STREAM_FORMAT", "h264").lower()
         requested_format = (
@@ -162,8 +163,15 @@ class LiveStreamSession:
         state.viewer.connect_time = time.monotonic()
         state.viewer.playback_started = False
         state.viewer.last_ack_time = time.monotonic()
-        state.pipeline.ack_frame = -1
-        state.pipeline.media_ack_frame = -1
+        with state.pipeline.lock:
+            state.pipeline.ack_frame = -1
+            state.pipeline.media_ack_frame = -1
+            # The inference worker starts at zero for this viewer. Discard a
+            # reset queued by the previous viewer after its worker stopped.
+            state.interrupt.reset_frame = -1
+            # A new viewer has no decoder state to reset, so any flush that
+            # happened while nobody was watching is already satisfied.
+            state.pipeline.flush_sent_seq = state.pipeline.flush_seq
         self.max_prefetch_frames = max(
             state.model.prebuffer,
             int(state.model.fps * args.max_prefetch_seconds),
@@ -299,6 +307,9 @@ class LiveStreamSession:
                     generation and generation[0] != state.pipeline.flush_seq
                 ):
                     continue
+                if self.last_sent_frame == -1 and self.acked_frame == -1:
+                    self.last_sent_frame = frame_index - 1
+                    self.acked_frame = frame_index - 1
                 while (
                     self.last_sent_frame - self.acked_frame
                     >= self.max_prefetch_frames
@@ -319,6 +330,10 @@ class LiveStreamSession:
                         pass
                     if state.service.exit_requested or self.viewer_gone.is_set():
                         break
+                # A flush can arrive while this coroutine is waiting for queue
+                # credit. Emit its control message before considering the
+                # dequeued frame, then discard frames from the old epoch.
+                await self._send_controls()
                 if (
                     state.service.exit_requested
                     or self.viewer_gone.is_set()
@@ -390,6 +405,21 @@ class LiveStreamSession:
             self.replay_packets.clear()
             self.replay_bytes = 0
 
+    def _packets_for_resync(self) -> list[bytes]:
+        if self.resync_target is None:
+            return list(self.replay_packets)  # Older viewers have no target fields.
+        segment_id, frame_index = self.resync_target
+        key_start = None
+        for offset, packet in enumerate(self.replay_packets):
+            key = bool(packet[6] & 1) if packet[:4] == b"MTH1" else bool(packet[28])
+            if key:
+                key_start = offset
+            if (key_start is not None
+                    and int.from_bytes(packet[8:12], "big") == segment_id
+                    and int.from_bytes(packet[20:24], "big") == frame_index):
+                return self.replay_packets[key_start:]
+        return []
+
     def _drop_queued_frames(self) -> None:
         for frame_queue in (self.raw_queue, self.network_queue):
             if frame_queue is None:
@@ -418,6 +448,7 @@ class LiveStreamSession:
 
     async def _send_controls(self) -> None:
         state = self.state
+        sent_flush_seq: int | None = None
         if state.pipeline.flush_seq != self.flush_seq:
             self.flush_seq = state.pipeline.flush_seq
             self.replay_packets.clear()
@@ -430,12 +461,21 @@ class LiveStreamSession:
             self.control_messages.append(
                 {"type": "flush", "frame_index": flush_frame}
             )
+            sent_flush_seq = self.flush_seq
             self.credit_event.set()
         while self.control_messages:
-            await self.websocket.send_json(self.control_messages.pop(0))
+            message = self.control_messages.pop(0)
+            await self.websocket.send_json(message)
+            if message.get("type") == "flush" and sent_flush_seq is not None:
+                with state.pipeline.lock:
+                    state.pipeline.flush_sent_seq = max(
+                        state.pipeline.flush_sent_seq,
+                        sent_flush_seq,
+                    )
         if self.resync_requested:
             self.resync_requested = False
-            replay = list(self.replay_packets)
+            replay = self._packets_for_resync()
+            self.resync_target = None
             generation = self.flush_seq
             replayed = 0
             for packet in replay:
@@ -467,6 +507,13 @@ class LiveStreamSession:
             elif kind == "video_resync":
                 now = time.monotonic()
                 if now - self.last_resync_at >= 1.0:
+                    target = None
+                    if "frame_index" in message or "segment_id" in message:
+                        segment_id, frame = message.get("segment_id"), message.get("frame_index")
+                        if type(segment_id) is not int or type(frame) is not int or min(segment_id, frame) < 0:
+                            continue
+                        target = (segment_id, frame)
+                    self.resync_target = target
                     self.last_resync_at = now
                     self.resync_requested = True
                     self.credit_event.set()

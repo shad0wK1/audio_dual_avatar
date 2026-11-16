@@ -239,6 +239,7 @@ export class AvatarPlayer {
                 audioUrl: `${this.base}${msg.audio_url}`,
                 audioBuffer: null,
                 receivedFrames: new Set(),
+                highestWireFrame: -1,
                 startAt: null,
                 source: null,
             };
@@ -291,6 +292,10 @@ export class AvatarPlayer {
         const segmentId = view.getUint32(8);
         const ptsUs = Number(view.getBigInt64(12));
         const index = view.getUint32(20);
+        if (segmentId !== IDLE_SEGMENT && this._supportsVideoResync) {
+            const segment = this.segments.find(s => s.id === segmentId);
+            if (segment) segment.highestWireFrame = Math.max(segment.highestWireFrame, index);
+        }
         const ws = this.ws;
         const pixels = new Uint8Array(buffer, 24);
         if (magic === H264_FRAME_MAGIC) {
@@ -447,12 +452,17 @@ export class AvatarPlayer {
     }
 
     _hasPrebuffer(segment) {
+        return this._firstMissingFrame(segment) === null;
+    }
+
+    _firstMissingFrame(segment) {
         const needed = Math.min(segment.totalFrames, this._isContinuation(segment)
             ? CONTINUATION_PREBUFFER_FRAMES : CLIENT_PREBUFFER_FRAMES);
         for (let i = 0; i < needed; i += 1) {
-            if (!segment.receivedFrames.has(segment.startFrame + i)) return false;
+            const index = segment.startFrame + i;
+            if (!segment.receivedFrames.has(index)) return index;
         }
-        return true;
+        return null;
     }
 
     _isContinuation(segment) {
@@ -503,15 +513,22 @@ export class AvatarPlayer {
 
     _checkVideoBuffer(nowMs) {
         const pending = this.segments[this.scheduleCursor];
-        if (!this._supportsVideoResync || !pending || !pending.audioBuffer
-            || this._discardUntilFlush || this._hasPrebuffer(pending)) {
+        const missing = pending ? this._firstMissingFrame(pending) : null;
+        // Ordered WebSocket packets let us distinguish pending production from
+        // a frame that reached the browser but did not decode.
+        if (!this._supportsVideoResync || !pending?.audioBuffer || this._discardUntilFlush
+            || missing === null || !(pending.highestWireFrame >= missing)) {
             this._videoBufferWait = null;
             return;
         }
-        const count = pending.receivedFrames.size;
         const waiting = this._videoBufferWait;
-        if (!waiting || waiting.segment !== pending || waiting.count !== count) {
-            this._videoBufferWait = { segment: pending, count, since: nowMs };
+        if (!waiting || waiting.segment !== pending || waiting.missing !== missing) {
+            this._videoBufferWait = { segment: pending, missing, since: nowMs, requested: false };
+            return;
+        }
+        if (waiting.requested) {
+            // A targeted replay already failed to restore this exact frame.
+            if (nowMs - waiting.since >= 5000) this._fallbackToImages();
             return;
         }
         if (nowMs - waiting.since < 1500 || nowMs - this._lastVideoResyncAt < 2500
@@ -519,7 +536,8 @@ export class AvatarPlayer {
         // Recover the decoder from a bounded GOP replay without dropping
         // pending audio, resetting the conversation or disabling the mic.
         this._resetVideoDecoder();
-        this.ws.send(JSON.stringify({ type: 'video_resync' }));
+        this.ws.send(JSON.stringify({ type: 'video_resync', segment_id: pending.id, frame_index: missing }));
+        waiting.requested = true;
         this._lastVideoResyncAt = nowMs;
         waiting.since = nowMs;
     }

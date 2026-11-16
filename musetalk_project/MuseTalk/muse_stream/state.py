@@ -72,6 +72,10 @@ class PipelineState:
     # Upstream-initiated flush (no resume): the live session drops queued
     # frames and tells the viewer to stop playback after flush_frame.
     flush_seq: int = 0
+    # Highest flush sequence whose control message has been sent to the
+    # viewer. H.264 must not restart its encoder before this catches up,
+    # otherwise the new IDR can arrive before the client's decoder reset.
+    flush_sent_seq: int = 0
     flush_frame: int = -1
 
 

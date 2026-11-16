@@ -102,8 +102,10 @@ class VAE():
         latents = (1/  self.scaling_factor) * latents
         image = self.vae.decode(latents.to(self.vae.dtype)).sample
         image = (image / 2 + 0.5).clamp(0, 1)
-        image = image.detach().cpu().permute(0, 2, 3, 1).float().numpy()
-        image = (image * 255).round().astype("uint8")
+        # Quantize on the model device before transferring image data.
+        # This preserves FP32 rounding while avoiding slow CPU NumPy conversion.
+        image = (image.detach().permute(0, 2, 3, 1).float()
+                 .mul(255).round().to(torch.uint8).cpu().numpy())
         image = image[...,::-1] # RGB to BGR
         return image
     

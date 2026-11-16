@@ -367,11 +367,18 @@ class StreamAudioSession:
     ) -> None:
         state = self.state
         max_pending = int(self.args.stream_max_pending_windows)
+        next_status = time.monotonic() + 1
         while (
             self.segments.queued_count() >= max_pending
             and not state.interrupt.active
             and not state.service.exit_requested
         ):
+            # The MiniCPM bridge normally receives no window ACKs. While a
+            # full queue blocks receive(), a write also detects a closed peer
+            # and lets the session release the input lock and discard its tail.
+            if not self.send_acks and time.monotonic() >= next_status:
+                await self.websocket.send_json({"type": "queue_status", "queued_windows": max_pending})
+                next_status = time.monotonic() + 1
             await asyncio.sleep(0.05)
         if state.service.exit_requested:
             return

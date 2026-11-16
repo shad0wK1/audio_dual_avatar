@@ -1,0 +1,30 @@
+version: 1
+default_preset: gril_v2
+presets:
+  gril_v2:
+    name: 小鹿
+    description: 中文知识讲解
+    source: system
+    avatar_id: gril_v2
+    voice_ref: assets/ref_audio/ref_minicpm_signature.wav
+    prompt_file: assets/prompts/avatar/gril_v2.txt
+    order: 1
+    enabled: true
+  knowledge_host_720p:
+    name: 阿萍
+    description: 720p 知识传播数字人
+    source: system
+    avatar_id: knowledge_host_720p_stable_v1
+    voice_ref: assets/ref_audio/ref_avatar_default.wav
+    prompt_file: assets/prompts/avatar/knowledge_host.txt
+    order: 10
+    enabled: true
+  musetalk_test_avatar:
+    name: 小美
+    description: 480×864 经典数字人
+    source: system
+    avatar_id: musetalk_test_avatar
+    voice_ref: assets/ref_audio/ref_minicpm_signature.wav
+    prompt_file: assets/prompts/avatar/classic.txt
+    order: 20
+    enabled: true

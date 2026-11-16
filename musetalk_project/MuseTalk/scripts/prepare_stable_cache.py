@@ -14,8 +14,8 @@ from musetalk.utils.blending import get_image_prepare_material
 
 args=load_config('configs/streaming_duplex_knowledge.yaml').args
 runtime=build_runtime(args);vae=runtime.vae
-source=MUSE/'results/v15/avatars/knowledge_host_720p'
-name='knowledge_host_720p_stable_v1'
+source=MUSE/'results/v15/avatars/gril_v1'
+name='gril_v1'
 destination=source.parent/name
 assert not destination.exists(), 'Stable cache already exists; do not overwrite it'
 working=source.parent/(name+'.building')

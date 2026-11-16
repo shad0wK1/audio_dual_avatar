@@ -4413,6 +4413,11 @@ class DuplexCapability:
         self.token2wav_initialized = True
 
     def _reset_token2wav_for_new_turn(self):
+        # Both a natural turn end and barge-in must discard the acoustic
+        # transformer's history as well as the vocoder's pending samples.
+        self.tts_text_start_pos = 0
+        self.tts_past_key_values = None
+        self.tts_current_turn_start_time = None
         if self.token2wav_initialized:
             self.model.tts.audio_tokenizer.stream_cache = torch_clone_recursive(self.flow_cache_base)
             self.model.tts.audio_tokenizer.hift_cache_dict = torch_clone_recursive(self.hift_cache_base)
@@ -5262,13 +5267,9 @@ class DuplexCapability:
 
         tts_end_time = time.time()
 
-        # 更新 TTS 状态（注意：token2wav 的重置必须在音频生成之后，否则会丢失 buffer 中的 tokens）
-        if end_of_turn:
-            self.tts_text_start_pos = 0
-            self.tts_past_key_values = None
-            self.tts_current_turn_start_time = None
-            # 注意：_reset_token2wav_for_new_turn() 移到下面音频生成之后
-        else:
+        # Preserve the current turn only for continuation. A natural end
+        # resets both synthesis stages below, after rendering the final WAV.
+        if not end_of_turn:
             self.tts_past_key_values = old_kv
             self.tts_text_start_pos += tts_condition.shape[1] + new_tokens.shape[1]
 

@@ -76,8 +76,8 @@ class AudioConfig(BaseModel):
     avatar_ref_audio_path: Optional[str] = Field(
         default="assets/ref_audio/s1_6jogxFovm.wav",
         description=(
-            "纯音频数字人 /avatar 页面使用的参考音频路径；"
-            "不影响 /omni 和全局 TTS 默认音色"
+            "兼容回退参考音频路径；/avatar 预设以 assets/avatar_presets.yaml "
+            "中的 voice_ref 为准"
         ),
     )
     playback_delay_ms: int = Field(

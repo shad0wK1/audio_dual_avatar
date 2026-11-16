@@ -16,6 +16,10 @@ class AudioProcessor:
             return None
         librosa_output, sampling_rate = librosa.load(wav_path, sr=16000)
         assert sampling_rate == 16000
+        return self.features_from_samples(librosa_output, weight_dtype)
+
+    def features_from_samples(self, librosa_output, weight_dtype=None, device="cpu"):
+        sampling_rate = 16000
         # Split audio into 30s segments
         segment_length = 30 * sampling_rate
         segments = [librosa_output[i:i + segment_length] for i in range(0, len(librosa_output), segment_length)]
@@ -25,7 +29,7 @@ class AudioProcessor:
             audio_feature = self.feature_extractor(
                 segment,
                 return_tensors="pt",
-                sampling_rate=sampling_rate
+                sampling_rate=sampling_rate, device=str(device),
             ).input_features
             if weight_dtype is not None:
                 audio_feature = audio_feature.to(dtype=weight_dtype)

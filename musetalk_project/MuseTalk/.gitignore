@@ -5,6 +5,7 @@
 *.pyc
 .ipynb_checkpoints
 results/
+data/video/av_*.mp4
 models/
 **/__pycache__/
 *.py[cod]

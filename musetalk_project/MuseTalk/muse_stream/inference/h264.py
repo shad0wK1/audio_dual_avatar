@@ -346,6 +346,7 @@ class H264Encoder:
             codec.time_base = Fraction(1, self.fps)
             codec.framerate = Fraction(self.fps, 1)
             codec.thread_count = 4
+            max_kbps = max(256, int(os.environ.get("AVATAR_H264_MAX_KBPS", "3000")))
             codec.options = {
                 "preset": os.environ.get("AVATAR_H264_PRESET", "veryfast"),
                 "tune": "zerolatency",
@@ -354,7 +355,7 @@ class H264Encoder:
                 "level": "4.0",
                 "x264-params": (
                     f"keyint={max(1, int(os.environ.get('AVATAR_H264_GOP', self.fps * 2)))}:min-keyint=1:scenecut=0:bframes=0:"
-                    "repeat-headers=1:aud=1:vbv-maxrate=3000:vbv-bufsize=1500"
+                    f"repeat-headers=1:aud=1:vbv-maxrate={max_kbps}:vbv-bufsize={max_kbps // 2}"
                 ),
             }
             codec.open()

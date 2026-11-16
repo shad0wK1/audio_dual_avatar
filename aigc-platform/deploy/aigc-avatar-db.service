@@ -1,0 +1,5 @@
+[Unit]
+Description=Private account database for AIGC digital human
+[Service]
+ExecStart=/home/user01/audio_dual_avatar/aigc-platform/.runtime/auth/lib/python3.12/site-packages/pgserver/pginstall/bin/postgres -D /home/user01/audio_dual_avatar/aigc-platform/.runtime/avatar-account-db
+Restart=on-failure

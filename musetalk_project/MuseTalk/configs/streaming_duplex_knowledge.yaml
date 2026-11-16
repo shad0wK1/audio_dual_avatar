@@ -20,10 +20,10 @@ models:
   unet_config: ./models/musetalkV15/musetalk.json
 
 avatar:
-  id: knowledge_host_720p_stable_v1
-  video_path: data/video/knowledge_host_720p.mp4
+  id: gril_v2
+  video_path: data/video/gril.mp4
   bbox_shift: 0
-  preparation: auto
+  preparation: reuse
   extra_margin: 10
   parsing_mode: jaw
   left_cheek_width: 90

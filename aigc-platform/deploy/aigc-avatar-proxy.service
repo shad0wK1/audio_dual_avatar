@@ -1,0 +1,9 @@
+[Unit]
+Description=AIGC platform frontend and avatar BFF reverse proxy
+[Service]
+WorkingDirectory=%h/audio_dual_avatar/aigc-platform
+ExecStart=%h/audio_dual_avatar/aigc-platform/.runtime/caddy/usr/bin/caddy run --config %h/audio_dual_avatar/aigc-platform/deploy/Caddyfile --adapter caddyfile
+Restart=on-failure
+RestartSec=3
+[Install]
+WantedBy=default.target

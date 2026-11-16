@@ -9,6 +9,7 @@ import numpy as np
 
 from ..domain import LiveSegment
 from ..log import log
+from ..models import stream_audio_features
 from ..protocol import frame_pts_us
 from ..state import AppState
 
@@ -91,26 +92,7 @@ class InferencePipeline:
         assert args is not None
 
         feature_started = time.monotonic()
-        (
-            whisper_input_features,
-            librosa_length,
-        ) = runtime.audio_processor.get_audio_feature(
-            str(segment.wav_path),
-            weight_dtype=runtime.weight_dtype,
-        )
-        whisper_chunks = runtime.audio_processor.get_whisper_chunk(
-            whisper_input_features,
-            runtime.device,
-            runtime.weight_dtype,
-            runtime.whisper,
-            librosa_length,
-            fps=args.fps,
-            audio_padding_length_left=args.audio_padding_length_left,
-            audio_padding_length_right=args.audio_padding_length_right,
-            feature_window_mode=args.feature_window_mode,
-            feature_window_left=args.feature_window_left,
-            feature_window_right=args.feature_window_right,
-        )
+        whisper_chunks, mel_ms, whisper_ms = stream_audio_features(runtime, args, segment.wav_path)
         feature_seconds = time.monotonic() - feature_started
         total_frames = segment.total_frames
         extra_frames = segment.extra_frames
@@ -196,6 +178,7 @@ class InferencePipeline:
                         log(f"inference timing: segment={segment.id} "
                             f"feature_ms={feature_seconds * 1000:.1f} "
                             f"first_batch_ms={batch_seconds * 1000:.1f} "
+                            f"mel_ms={mel_ms:.1f} whisper_ms={whisper_ms:.1f} "
                             f"batch_size={args.batch_size}")
                     if batch_seconds > 2:
                         log(

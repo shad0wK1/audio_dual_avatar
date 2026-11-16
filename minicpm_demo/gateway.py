@@ -22,6 +22,7 @@ import time
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from contextlib import asynccontextmanager
+from pathlib import Path
 from urllib.parse import urlencode
 
 import zipfile
@@ -30,9 +31,20 @@ from io import BytesIO
 import httpx
 import numpy as np
 import uvicorn
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request, UploadFile, File, Body
+from fastapi import (
+    Body,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    Request,
+    UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import HTMLResponse, FileResponse, StreamingResponse, Response, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 
 from gateway_modules.models import (
@@ -49,6 +61,22 @@ from gateway_modules.avatar_bridge import (
     AvatarBridge,
     bridge_url as avatar_bridge_url,
     http_url as avatar_http_url,
+)
+from gateway_modules.avatar_presets import (
+    AvatarPresetError,
+    AvatarPresetRegistry,
+)
+from gateway_modules.avatar_preset_admin import (
+    AvatarPresetAdminService,
+    AvatarPresetDeleteError,
+)
+from gateway_modules.avatar_session_api import (
+    AvatarSessionError,
+    AvatarSessionService,
+)
+from gateway_modules.avatar_customization import (
+    AvatarCustomizationError,
+    AvatarCustomizationService,
 )
 from gateway_modules.ref_audio_registry import (
     RefAudioRegistry,
@@ -133,6 +161,11 @@ def _identity_dict(
 
 worker_pool: Optional[WorkerPool] = None
 ref_audio_registry: Optional[RefAudioRegistry] = None
+avatar_preset_registry: Optional[AvatarPresetRegistry] = None
+avatar_session_service: Optional[AvatarSessionService] = None
+avatar_customization_service: Optional[AvatarCustomizationService] = None
+avatar_preset_admin_service: Optional[AvatarPresetAdminService] = None
+_avatar_preset_delete_lock = asyncio.Lock()
 app_registry: AppRegistry = AppRegistry()
 
 # 配置（通过 main() 传入）
@@ -147,7 +180,9 @@ _cleanup_task: Optional[asyncio.Task] = None
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期"""
-    global worker_pool, ref_audio_registry, _cleanup_task
+    global worker_pool, ref_audio_registry, avatar_preset_registry
+    global avatar_session_service, avatar_customization_service
+    global avatar_preset_admin_service, _cleanup_task
 
     workers = GATEWAY_CONFIG.get("workers", [])
     max_queue = GATEWAY_CONFIG.get("max_queue_size", 1000)
@@ -170,6 +205,97 @@ async def lifespan(app: FastAPI):
     # 初始化参考音频注册表
     data_dir = os.path.join(os.path.dirname(__file__), "data", "assets", "ref_audio")
     ref_audio_registry = RefAudioRegistry(storage_dir=data_dir)
+    customization_root_value = os.getenv(
+        "AVATAR_CUSTOMIZATION_DATA_ROOT",
+        "",
+    ).strip() or "data/avatar_customizations"
+    customization_data_root = Path(customization_root_value)
+    if not customization_data_root.is_absolute():
+        customization_data_root = Path(_BASE_DIR) / customization_data_root
+    customization_data_root = customization_data_root.resolve()
+    try:
+        customization_data_root.relative_to(Path(_BASE_DIR).resolve())
+    except ValueError as exc:
+        raise RuntimeError(
+            "AVATAR_CUSTOMIZATION_DATA_ROOT must be under minicpm_demo/"
+        ) from exc
+    runtime_preset_file = os.getenv(
+        "AVATAR_RUNTIME_PRESET_FILE",
+        "",
+    ).strip() or str(
+        customization_data_root / "avatar_presets.user.yaml"
+    )
+    avatar_preset_registry = AvatarPresetRegistry(
+        project_root=_BASE_DIR,
+        config_path="assets/avatar_presets.yaml",
+        runtime_config_path=runtime_preset_file,
+    )
+    bridge_url = avatar_bridge_url()
+    http_url = avatar_http_url()
+    avatar_preset_admin_service = AvatarPresetAdminService(
+        project_root=Path(_BASE_DIR).resolve().parent,
+        runtime_config_path=runtime_preset_file,
+        avatar_http_url=http_url or "",
+    )
+    if bridge_url and http_url:
+        avatar_session_service = AvatarSessionService(
+            worker_pool=worker_pool,
+            preset_registry=avatar_preset_registry,
+            bridge_url=bridge_url,
+            avatar_http_url=http_url,
+            api_key=os.getenv("AVATAR_SESSION_API_KEY", ""),
+            ttl_seconds=float(
+                os.getenv("AVATAR_SESSION_TTL_SECONDS", "180")
+            ),
+            max_session_seconds=float(
+                os.getenv("AVATAR_SESSION_MAX_SECONDS", "600")
+            ),
+        )
+    else:
+        avatar_session_service = None
+
+    customization_enabled = os.getenv(
+        "AVATAR_CUSTOMIZATION_ENABLED",
+        "true",
+    ).lower() in {"1", "true", "yes", "on"}
+    if customization_enabled:
+        avatar_customization_service = AvatarCustomizationService(
+            project_root=_avatar_customization_project_root(),
+            data_root=customization_data_root,
+            max_video_seconds=float(
+                os.getenv("AVATAR_CUSTOMIZATION_VIDEO_MAX_SECONDS", "20")
+            ),
+            max_audio_seconds=float(
+                os.getenv("AVATAR_CUSTOMIZATION_AUDIO_MAX_SECONDS", "20")
+            ),
+            max_video_bytes=int(
+                os.getenv(
+                    "AVATAR_CUSTOMIZATION_VIDEO_MAX_MB",
+                    "200",
+                )
+            ) * 1024 * 1024,
+            max_audio_bytes=int(
+                os.getenv(
+                    "AVATAR_CUSTOMIZATION_AUDIO_MAX_MB",
+                    "20",
+                )
+            ) * 1024 * 1024,
+            max_prompt_bytes=int(
+                os.getenv("AVATAR_CUSTOMIZATION_PROMPT_MAX_BYTES", "65536")
+            ),
+            min_free_vram_mb=int(
+                os.getenv("AVATAR_CUSTOMIZATION_MIN_FREE_MB", "12000")
+            ),
+            gpu_id=os.getenv("AVATAR_CUSTOMIZATION_GPU", ""),
+            avatar_http_url=http_url or "",
+            allow_busy=os.getenv(
+                "AVATAR_CUSTOMIZATION_ALLOW_BUSY",
+                "false",
+            ).lower() in {"1", "true", "yes", "on"},
+        )
+        await avatar_customization_service.start()
+    else:
+        avatar_customization_service = None
 
     # 启动 session 清理后台任务（每天一次）
     _cleanup_task = asyncio.create_task(_session_cleanup_loop())
@@ -180,7 +306,12 @@ async def lifespan(app: FastAPI):
 
     if _cleanup_task:
         _cleanup_task.cancel()
+    if avatar_customization_service is not None:
+        await avatar_customization_service.stop()
+        avatar_customization_service = None
+    avatar_preset_admin_service = None
     await worker_pool.stop()
+    avatar_session_service = None
     logger.info("Gateway stopped")
 
 
@@ -226,6 +357,24 @@ internal_app = FastAPI(
 
 # Compress page assets and JSON without buffering WebSocket streams.
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
+_avatar_cors_origins = [
+    value.strip()
+    for value in os.getenv("AVATAR_SESSION_ALLOWED_ORIGINS", "").split(",")
+    if value.strip()
+]
+if _avatar_cors_origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=_avatar_cors_origins,
+        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "X-API-Key",
+            "X-Avatar-Owner-ID",
+        ],
+        allow_credentials=False,
+    )
 
 _PUBLIC_ADMIN_ENABLED = os.getenv("ENABLE_PUBLIC_ADMIN", "").lower() in {"1", "true", "yes", "on"}
 _BLOCKED_ADMIN_PATHS = {"/admin", "/admin/"}
@@ -866,10 +1015,27 @@ async def get_default_ref_audio():
 
 @app.get("/api/avatar_ref_audio")
 async def get_avatar_ref_audio():
-    """Return the /avatar-only voice reference as float32 PCM base64."""
+    """Return the default /avatar preset's voice as float32 PCM base64."""
     global _avatar_ref_audio_cache
-    if _avatar_ref_audio_cache is not None:
+    if avatar_preset_registry is None and _avatar_ref_audio_cache is not None:
         return _avatar_ref_audio_cache
+
+    if avatar_preset_registry is not None:
+        try:
+            config = avatar_preset_registry.load()
+            _avatar_ref_audio_cache = await asyncio.to_thread(
+                avatar_preset_registry.voice_audio,
+                config.default_preset_id,
+            )
+            return _avatar_ref_audio_cache
+        except AvatarPresetError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={
+                    "code": "avatar_preset_unavailable",
+                    "message": str(exc),
+                },
+            ) from exc
 
     from config import get_config
     cfg = get_config()
@@ -1013,6 +1179,11 @@ async def list_cache():
 # ============ Session API ============
 
 _BASE_DIR = os.path.dirname(__file__)
+
+
+def _avatar_customization_project_root() -> Path:
+    """Repository root used to launch the runtime avatar generator."""
+    return Path(_BASE_DIR).resolve().parent
 
 
 def _list_active_sessions_payload() -> Dict[str, Any]:
@@ -1352,6 +1523,468 @@ async def avatar_page():
     return FileResponse(os.path.join(static_dir, "avatar", "avatar.html"))
 
 
+@app.get("/avatar-v2", response_class=HTMLResponse)
+async def avatar_v2_page():
+    """Single-WebSocket avatar API demo page."""
+    if not app_registry.is_enabled("avatar") or avatar_session_service is None:
+        fallback = "/avatar" if app_registry.is_enabled("avatar") else "/"
+        return RedirectResponse(url=fallback, status_code=302)
+    return FileResponse(os.path.join(static_dir, "avatar-v2", "index.html"))
+
+
+def _avatar_session_service_or_503() -> AvatarSessionService:
+    if avatar_session_service is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "avatar_session_not_configured",
+                "message": "AVATAR_BRIDGE_URL and AVATAR_HTTP_URL are required",
+            },
+        )
+    return avatar_session_service
+
+
+def _request_api_key(request: Request) -> Optional[str]:
+    authorization = request.headers.get("authorization", "")
+    if authorization.lower().startswith("bearer "):
+        return authorization[7:].strip()
+    return request.headers.get("x-api-key")
+
+
+def _request_owner_id(request: Request) -> Optional[str]:
+    value = request.headers.get("x-avatar-owner-id", "").strip()
+    return value or None
+
+
+@app.get("/v1/avatar/presets")
+async def public_avatar_presets(request: Request):
+    """List avatar presets through the public session API."""
+    service = _avatar_session_service_or_503()
+    try:
+        service.require_api_key(_request_api_key(request))
+        return await service.list_presets(_request_owner_id(request))
+    except AvatarSessionError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+
+
+def _avatar_preset_admin_or_503() -> AvatarPresetAdminService:
+    if avatar_preset_admin_service is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "avatar_preset_admin_unavailable",
+                "message": "Avatar preset management is unavailable",
+            },
+        )
+    return avatar_preset_admin_service
+
+
+def _public_preset_delete_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    cleanup = result.get("resource_cleanup") or {}
+    return {
+        "deleted": bool(result.get("deleted")),
+        "preset_id": result.get("preset_id"),
+        "source": result.get("source"),
+        "removed_resources": [
+            "preset_config",
+            *[
+                item["resource"]
+                for item in cleanup.get("deleted", [])
+            ],
+        ],
+        "retained_resources": [
+            {
+                "resource": item["resource"],
+                "reason": "shared",
+            }
+            for item in result.get("files_retained", [])
+        ],
+        "cleanup_failed": bool(cleanup.get("failed")),
+    }
+
+
+async def _delete_avatar_preset(
+    preset_id: str,
+    request: Request,
+    *,
+    require_api_key: bool,
+    switch_to_default: bool,
+) -> Dict[str, Any]:
+    async with _avatar_preset_delete_lock:
+        admin = _avatar_preset_admin_or_503()
+        registry = _avatar_preset_or_503()
+        session_service = avatar_session_service
+        if require_api_key:
+            session_service = _avatar_session_service_or_503()
+            try:
+                session_service.require_api_key(_request_api_key(request))
+            except AvatarSessionError as exc:
+                raise HTTPException(
+                    status_code=exc.status_code,
+                    detail={"code": exc.code, "message": str(exc)},
+                ) from exc
+        if (
+            session_service is not None
+            and await session_service.is_preset_in_use(preset_id)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "avatar_in_use",
+                    "message": "Avatar preset is used by an active session",
+                },
+            )
+        owner_id = _customization_owner_id(request)
+        status = await _fetch_avatar_status(avatar_http_url())
+        try:
+            target = await asyncio.to_thread(
+                registry.get,
+                preset_id,
+                owner_id,
+            )
+        except AvatarPresetError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={
+                    "code": "avatar_preset_unavailable",
+                    "message": str(exc),
+                },
+            ) from exc
+        if target.source != "user":
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "code": "system_preset_protected",
+                    "message": "System avatar presets cannot be deleted through the API",
+                },
+            )
+        if target.owner_id != owner_id:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "preset_not_found",
+                    "message": "Avatar preset not found",
+                },
+            )
+
+        active_avatar_id = str(
+            status.get("active_avatar_id") or ""
+        )
+        switched_to: Optional[Dict[str, Any]] = None
+        if active_avatar_id == target.avatar_id:
+            default_preset_id = (
+                await asyncio.to_thread(registry.load)
+            ).default_preset_id
+            if not switch_to_default:
+                try:
+                    fallback = await _resolve_delete_default_preset(
+                        registry,
+                        status,
+                        exclude_preset_id=preset_id,
+                        exclude_avatar_id=target.avatar_id,
+                    )
+                    default_preset_id = fallback["id"]
+                except HTTPException:
+                    pass
+                raise HTTPException(
+                    status_code=409,
+                    detail={
+                        "code": "avatar_active",
+                        "message": "Avatar preset is currently active",
+                        "active_avatar_id": active_avatar_id,
+                        "default_preset_id": default_preset_id,
+                        "can_switch_to_default": True,
+                    },
+                )
+            switched_to = await _resolve_delete_default_preset(
+                registry,
+                status,
+                exclude_preset_id=preset_id,
+                exclude_avatar_id=target.avatar_id,
+            )
+            await _switch_avatar_for_delete(switched_to["avatar_id"])
+
+        try:
+            result = await asyncio.to_thread(
+                admin.delete,
+                preset_id,
+                owner_id=owner_id,
+                api_mode=True,
+            )
+        except AvatarPresetDeleteError as exc:
+            raise HTTPException(
+                status_code=exc.status_code,
+                detail={"code": exc.code, "message": str(exc)},
+            ) from exc
+        registry.invalidate()
+        public = _public_preset_delete_result(result)
+        public.update(
+            {
+                "switched_to_preset_id": (
+                    switched_to["id"] if switched_to else None
+                ),
+                "switched_avatar_id": (
+                    switched_to["avatar_id"] if switched_to else None
+                ),
+                "active_avatar_id": (
+                    switched_to["avatar_id"]
+                    if switched_to
+                    else active_avatar_id or None
+                ),
+                "requires_preset_selection": False,
+            }
+        )
+        return public
+
+
+async def _resolve_delete_default_preset(
+    registry: AvatarPresetRegistry,
+    avatar_status: Dict[str, Any],
+    *,
+    exclude_preset_id: str,
+    exclude_avatar_id: str,
+) -> Dict[str, Any]:
+    config = await asyncio.to_thread(registry.load)
+    by_id = {preset.id: preset for preset in config.presets}
+    candidates = []
+    default = by_id.get(config.default_preset_id)
+    if default is not None:
+        candidates.append(default)
+    candidates.extend(
+        preset
+        for preset in config.presets
+        if preset.source == "system" and preset is not default
+    )
+    for preset in candidates:
+        if (
+            not preset.enabled
+            or preset.source != "system"
+            or preset.id == exclude_preset_id
+            or preset.avatar_id == exclude_avatar_id
+        ):
+            continue
+        try:
+            return await asyncio.to_thread(
+                registry.public_item,
+                preset.id,
+                avatar_status,
+                None,
+            )
+        except AvatarPresetError:
+            continue
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "no_system_default_preset",
+            "message": "No available system preset can replace the active avatar",
+        },
+    )
+
+
+async def _switch_avatar_for_delete(avatar_id: str) -> None:
+    base = avatar_http_url()
+    if not base:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "avatar_unavailable",
+                "message": "Avatar service URL is not configured",
+            },
+        )
+    try:
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.post(
+                f"{base}/api/avatar/select",
+                json={"avatar_id": avatar_id},
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "code": "avatar_switch_failed",
+                "message": f"Failed to switch to default avatar: {exc}",
+            },
+        ) from exc
+    if response.status_code != 200:
+        try:
+            detail = response.json().get("detail")
+        except Exception:
+            detail = response.text[:300]
+        raise HTTPException(
+            status_code=(
+                response.status_code
+                if 400 <= response.status_code < 500
+                else 502
+            ),
+            detail={
+                "code": "avatar_switch_failed",
+                "message": str(
+                    detail or f"avatar service returned {response.status_code}"
+                ),
+            },
+        )
+
+
+@app.delete("/v1/avatar/presets/{preset_id}")
+async def delete_public_avatar_preset(
+    preset_id: str,
+    request: Request,
+    switch_to_default: bool = False,
+):
+    """Delete one owner-created preset through the public API."""
+    return await _delete_avatar_preset(
+        preset_id,
+        request,
+        require_api_key=True,
+        switch_to_default=switch_to_default,
+    )
+
+
+@app.post("/v1/avatar/sessions", status_code=201)
+async def create_avatar_session(request: Request):
+    """Create one public avatar session and return its stream URL."""
+    service = _avatar_session_service_or_503()
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "invalid_json", "message": str(exc)},
+        ) from exc
+    try:
+        service.require_api_key(_request_api_key(request))
+        return await service.create_session(
+            payload,
+            _request_owner_id(request),
+        )
+    except AvatarSessionError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+
+
+def _avatar_customization_or_503() -> AvatarCustomizationService:
+    if avatar_customization_service is None:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "code": "avatar_customization_disabled",
+                "message": "Avatar customization is disabled",
+            },
+        )
+    return avatar_customization_service
+
+
+def _customization_owner_id(request: Request) -> str:
+    return _request_owner_id(request) or "anonymous"
+
+
+@app.post("/v1/avatar/customizations", status_code=202)
+async def create_avatar_customization(
+    request: Request,
+    video: UploadFile = File(...),
+    audio: UploadFile = File(...),
+    prompt: str = Form(...),
+    name: str = Form(...),
+    description: str = Form(""),
+):
+    session_service = _avatar_session_service_or_503()
+    service = _avatar_customization_or_503()
+    try:
+        session_service.require_api_key(_request_api_key(request))
+        job = await service.create_job(
+            owner_id=_customization_owner_id(request),
+            video=video,
+            audio=audio,
+            prompt=prompt,
+            name=name,
+            description=description,
+        )
+        return service.public_job(job)
+    except AvatarSessionError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    except AvatarCustomizationError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+
+
+@app.get("/v1/avatar/customizations/{job_id}")
+async def get_avatar_customization(job_id: str, request: Request):
+    session_service = _avatar_session_service_or_503()
+    service = _avatar_customization_or_503()
+    try:
+        session_service.require_api_key(_request_api_key(request))
+        job = await service.get_job(
+            job_id,
+            _customization_owner_id(request),
+        )
+        return service.public_job(job)
+    except AvatarSessionError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    except AvatarCustomizationError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+
+
+@app.delete("/v1/avatar/customizations/{job_id}")
+async def cancel_avatar_customization(job_id: str, request: Request):
+    session_service = _avatar_session_service_or_503()
+    service = _avatar_customization_or_503()
+    try:
+        session_service.require_api_key(_request_api_key(request))
+        job = await service.cancel_job(
+            job_id,
+            _customization_owner_id(request),
+        )
+        return service.public_job(job)
+    except AvatarSessionError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+    except AvatarCustomizationError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
+
+
+@app.websocket("/v1/avatar/sessions/{session_id}/stream")
+async def avatar_session_stream(websocket: WebSocket, session_id: str):
+    """Single-WebSocket transport for public avatar sessions."""
+    service = avatar_session_service
+    if service is None:
+        await websocket.accept()
+        await websocket.send_json(
+            {
+                "type": "error",
+                "code": "avatar_session_not_configured",
+                "message": "Avatar session API is not configured",
+            }
+        )
+        await websocket.close(code=1013)
+        return
+    await service.run_stream(
+        websocket,
+        session_id,
+        websocket.query_params.get("token", ""),
+    )
+
+
 @app.get("/avatar-live/api/status")
 async def avatar_live_status():
     base = avatar_http_url()
@@ -1381,6 +2014,185 @@ async def avatar_live_list():
         )
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"avatar service unavailable: {exc}")
+
+
+def _avatar_preset_or_503() -> AvatarPresetRegistry:
+    if avatar_preset_registry is None:
+        raise HTTPException(status_code=503, detail="avatar presets not initialized")
+    return avatar_preset_registry
+
+
+async def _fetch_avatar_status(base: str) -> Dict[str, Any]:
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.get(f"{base}/api/avatars")
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"avatar service unavailable: {exc}",
+        ) from exc
+    if response.status_code != 200:
+        raise HTTPException(
+            status_code=502,
+            detail=f"avatar service returned HTTP {response.status_code}",
+        )
+    try:
+        data = response.json()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"avatar service returned invalid JSON: {exc}",
+        ) from exc
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=502, detail="avatar service returned invalid data")
+    return data
+
+
+@app.get("/avatar-live/api/avatar-presets")
+async def avatar_preset_list(request: Request):
+    base = avatar_http_url()
+    if not base:
+        raise HTTPException(status_code=404, detail="avatar disabled")
+    registry = _avatar_preset_or_503()
+    avatar_status = await _fetch_avatar_status(base)
+    try:
+        return await asyncio.to_thread(
+            registry.public_list,
+            avatar_status,
+            _request_owner_id(request),
+        )
+    except AvatarPresetError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={
+                "code": "avatar_preset_config_error",
+                "message": str(exc),
+            },
+        ) from exc
+    except Exception as exc:
+        logger.exception("Failed to load avatar presets")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "avatar_preset_config_error",
+                "message": str(exc),
+            },
+        ) from exc
+
+
+@app.delete("/avatar-live/api/avatar-presets/{preset_id}")
+async def avatar_preset_delete(
+    preset_id: str,
+    request: Request,
+    switch_to_default: bool = False,
+):
+    """Delete an owner-created preset from the same-origin avatar page."""
+    return await _delete_avatar_preset(
+        preset_id,
+        request,
+        require_api_key=False,
+        switch_to_default=switch_to_default,
+    )
+
+
+@app.get("/avatar-live/api/avatar-presets/{preset_id}/ref-audio")
+async def avatar_preset_ref_audio(preset_id: str, request: Request):
+    registry = _avatar_preset_or_503()
+    try:
+        payload = await asyncio.to_thread(
+            registry.voice_audio,
+            preset_id,
+            _request_owner_id(request),
+        )
+    except AvatarPresetError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={
+                "code": "avatar_preset_voice_error",
+                "message": str(exc),
+            },
+        ) from exc
+    except Exception as exc:
+        logger.exception("Failed to load avatar preset voice")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "avatar_preset_voice_error",
+                "message": str(exc),
+            },
+        ) from exc
+    return JSONResponse(payload, headers={"Cache-Control": "no-store"})
+
+
+@app.post("/avatar-live/api/avatar-presets/{preset_id}/activate")
+async def avatar_preset_activate(preset_id: str, request: Request):
+    base = avatar_http_url()
+    if not base:
+        raise HTTPException(status_code=404, detail="avatar disabled")
+    registry = _avatar_preset_or_503()
+    avatar_status = await _fetch_avatar_status(base)
+    try:
+        item = await asyncio.to_thread(
+            registry.public_item,
+            preset_id,
+            avatar_status,
+            _request_owner_id(request),
+        )
+    except AvatarPresetError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={
+                "code": "avatar_preset_unavailable",
+                "message": str(exc),
+            },
+        ) from exc
+    except Exception as exc:
+        logger.exception("Failed to resolve avatar preset")
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "code": "avatar_preset_config_error",
+                "message": str(exc),
+            },
+        ) from exc
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:
+            response = await client.post(
+                f"{base}/api/avatar/select",
+                json={"avatar_id": item["avatar_id"]},
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"avatar service unavailable: {exc}",
+        ) from exc
+
+    try:
+        result = response.json()
+    except Exception:
+        result = {}
+    if response.status_code != 200:
+        detail = result.get("detail") if isinstance(result, dict) else None
+        if isinstance(detail, dict):
+            message = detail.get("message") or detail.get("code")
+        else:
+            message = str(detail or result or "avatar activation failed")
+        raise HTTPException(
+            status_code=response.status_code,
+            detail={
+                "code": "avatar_preset_activation_failed",
+                "message": message,
+            },
+        )
+
+    return {
+        "success": True,
+        **item,
+        "width": result.get("width", item.get("cache", {}).get("width")),
+        "height": result.get("height", item.get("cache", {}).get("height")),
+        "avatar_revision": result.get("avatar_revision"),
+    }
 
 
 @app.get("/avatar-live/api/avatar")

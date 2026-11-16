@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -47,3 +48,6 @@ class Runtime:
     face_parser: Any
     timesteps: Any
     weight_dtype: Any
+    feature_worker: ThreadPoolExecutor = field(default_factory=lambda: ThreadPoolExecutor(
+        max_workers=1, thread_name_prefix="avatar-features",
+    ))

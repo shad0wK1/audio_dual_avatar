@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#11141e">
     <title>实时交互数字人</title>
-    <link rel="stylesheet" href="/static/avatar/avatar.css?v=prompt2">
-    <link rel="modulepreload" href="/static/avatar/avatar-app.js?v=bufferfix2">
-    <link rel="modulepreload" href="/static/avatar/avatar-player.js?v=bufferfix2">
+    <link rel="stylesheet" href="/static/avatar/avatar.css?v=customization3">
+    <link rel="modulepreload" href="/static/avatar/avatar-app.js?v=customization3">
+    <link rel="modulepreload" href="/static/avatar/avatar-player.js?v=feature-recovery2">
 </head>
 <body>
     <svg class="icon-defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"><defs>
@@ -15,6 +15,7 @@
         <symbol id="i-mic" viewBox="0 0 24 24"><rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 10v2a7 7 0 0 0 14 0v-2M12 19v3m-4 0h8"/></symbol>
         <symbol id="i-speaker" viewBox="0 0 24 24"><path d="M11 5 6 9H3v6h3l5 4V5Zm4 3a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/></symbol>
         <symbol id="i-prompt" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="3"/><path d="M8 8h8m-8 4h8m-8 4h5"/></symbol>
+        <symbol id="i-avatar" viewBox="0 0 24 24"><circle cx="12" cy="8" r="3.5"/><path d="M5 20c.7-3.6 3.2-5.5 7-5.5s6.3 1.9 7 5.5"/></symbol>
         <symbol id="i-chat" viewBox="0 0 24 24"><path d="M21 12a8 8 0 0 1-8 8H4l-2 2V11a9 9 0 0 1 9-9h2a8 8 0 0 1 8 8v2Z"/><path d="M7 10h10m-10 4h6"/></symbol>
         <symbol id="i-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7V5Z"/></symbol>
         <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></symbol>
@@ -23,6 +24,7 @@
     <header class="app-header">
         <a class="brand" href="/avatar" aria-label="实时交互数字人首页"><span class="brand-mark"><svg><use href="#i-sound"/></svg></span><span>实时交互数字人<small>自然交流，实时回应</small></span></a>
         <div class="header-status">
+            <a class="mode-link" href="/avatar-v2">单连接 API</a>
             <a class="mode-link" href="/omni">完整 Omni</a>
             <span class="feature-label">音频全双工</span>
             <span class="connection" id="serviceStatus" role="status"><i></i><span>连接中</span></span>
@@ -31,11 +33,11 @@
     <main class="workspace">
         <section class="portrait-card" aria-label="数字人">
             <div class="portrait-stage">
-                <img class="portrait-poster" src="/static/avatar/avatar-poster.jpg?v=knowledge720p1" alt="数字人形象" width="768" height="1344" fetchpriority="high">
+                <img id="avatarPoster" class="portrait-poster" alt="数字人形象" width="768" height="1344" fetchpriority="high">
                 <canvas id="avatarCanvas" width="480" height="864" aria-label="数字人实时画面"></canvas>
                 <div class="portrait-shade"></div>
                 <div class="portrait-topline"><span class="live-label"><i></i>LIVE</span><span class="portrait-time" id="sessionClock">00:00</span></div>
-                <div class="portrait-heading"><span class="portrait-eyebrow">你的实时语音伙伴</span><h1>随时开口，自然对话</h1></div>
+                <div class="portrait-heading"><span class="portrait-eyebrow">你的实时语音伙伴</span><h1 id="portraitName">数字人</h1></div>
                 <div class="avatar-subtitle" id="avatarSubtitle" hidden></div>
                 <div class="portrait-bottom"><span class="avatar-status" id="avatarStatus" data-state="off">准备好后，点击开始对话</span><span class="listening-light" aria-hidden="true"></span></div>
             </div>
@@ -51,10 +53,47 @@
             </div>
         </section>
         <aside class="settings-column" aria-label="对话设置与记录">
+            <details class="panel avatar-create-panel" id="avatarCreatePanel">
+                <summary class="panel-heading">
+                    <span><span class="panel-icon"><svg><use href="#i-avatar"/></svg></span><span>创建我的形象</span></span>
+                    <span class="avatar-preset-status" id="customAvatarStatus">上传素材生成</span>
+                </summary>
+                <form class="avatar-create-form" id="avatarCreateForm">
+                    <label class="field-label">
+                        <span>形象视频</span>
+                        <input id="customVideo" type="file" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm" required>
+                    </label>
+                    <label class="field-label">
+                        <span>参考音频</span>
+                        <input id="customAudio" type="file" accept="audio/wav,audio/mpeg,audio/mp4,audio/flac,audio/ogg,.wav,.mp3,.m4a,.flac,.ogg" required>
+                    </label>
+                    <label class="field-label">
+                        <span>形象名称</span>
+                        <input id="customAvatarName" type="text" maxlength="80" placeholder="例如：我的讲解员" required>
+                    </label>
+                    <label class="field-label">
+                        <span>形象说明</span>
+                        <input id="customAvatarDescription" type="text" maxlength="300" placeholder="可选">
+                    </label>
+                    <div class="avatar-create-actions">
+                        <button class="button button-primary" id="btnCreateAvatar" type="submit">上传并生成</button>
+                        <span class="avatar-create-hint" id="customAvatarHint">视频和音频均不超过 20 秒</span>
+                    </div>
+                    <progress id="customAvatarProgress" max="100" value="0" hidden></progress>
+                </form>
+            </details>
+            <section class="panel avatar-panel" aria-labelledby="avatarPresetTitle">
+                <div class="panel-heading">
+                    <div><span class="panel-icon"><svg><use href="#i-avatar"/></svg></span><h2 id="avatarPresetTitle">数字人形象</h2></div>
+                    <span class="avatar-preset-status" id="avatarPresetStatus">检查可用性…</span>
+                </div>
+                <div class="avatar-preset-grid" id="avatarPresetGrid" role="radiogroup" aria-label="数字人形象预设"><span class="avatar-preset-loading">正在加载形象预设…</span></div>
+                <div class="avatar-preset-footer"><span>视频基底与参考音色会同步切换</span><button class="text-button" id="btnRefreshAvatars" type="button">检查状态</button></div>
+            </section>
             <section class="panel prompt-panel" aria-labelledby="promptTitle">
                 <div class="panel-heading"><div><span class="panel-icon"><svg><use href="#i-prompt"/></svg></span><h2 id="promptTitle">系统提示词</h2></div><button class="text-button" id="btnResetPrompt">恢复默认</button></div>
                 <label class="sr-only" for="systemPrompt">系统提示词</label>
-                <textarea id="systemPrompt" rows="4" spellcheck="false" placeholder="描述数字人的角色、语气和回答方式…">你叫阿萍，是一名专业、亲切的中文知识传播助手，面向普通大众进行准确、易懂、有温度的知识讲解。你的目标是帮助用户理解概念、建立知识框架，并能在生活或学习中应用。回答时：先准确理解问题，必要时用一句话澄清；默认使用自然、简洁的中文口语，先给核心结论，再分点解释，必要时使用类比或例子；根据用户背景控制专业术语密度，首次出现时进行解释；涉及事实、数据、研究或出处时说明确定性，不编造，不确定就明确说明并给出可靠的核查方向；对争议话题保持中立，呈现主要观点和依据；语音回答避免冗长和复杂格式，一般控制在几句话到一小段，用户要求时再深入展开；合适时可以给一个延伸问题或可执行的小建议，但不要机械追问。始终尊重用户，不传播歧视、仇恨、违法或危险内容。</textarea>
+                <textarea id="systemPrompt" rows="4" spellcheck="false" placeholder="系统提示词会随数字人预设自动加载…"></textarea>
                 <div class="prompt-footer"><span>为数字人设定角色与表达方式</span><span id="promptCount">0 字</span></div>
             </section>
             <section class="panel audio-panel" aria-labelledby="audioTitle">
@@ -75,6 +114,6 @@
             </section>
         </aside>
     </main>
-    <script type="module" src="/static/avatar/avatar-app.js?v=bufferfix2"></script>
+    <script type="module" src="/static/avatar/avatar-app.js?v=customization3"></script>
 </body>
 </html>
