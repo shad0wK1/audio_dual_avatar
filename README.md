@@ -144,6 +144,4 @@ H.264/yuv420p，然后生成
 
     MUSETALK_CONFIG="$PWD/deploy/platform-start/local.yaml" bash deploy/platform-start/start_avatar.sh start
 
-已部署的 BFF 源码在 avatar-platform-integration-20261107/example/minimal-platform/，由上级目录的 manage.py 管理。平台网页和账号服务基于 https://github.com/shad0wK1/aigc-platform 的 ebd9c33268d107f5001e5b68bb1f503506e8109e。先取该提交，再将本分支 aigc-platform/ 下的文件按相对路径覆盖到平台工作目录，然后按平台项目的方式安装依赖和构建。systemd 和 Caddy 配置在其 deploy/ 下。Python 环境、账号数据库、会话密钥和 TLS 私钥由部署机器提供。
-
-构建平台网页时设置 NEXT_PUBLIC_AVATAR_EMBED_URL=/digital-human/。
+平台网页、BFF、登录对接和反向代理由 [aigc-platform 数字人目录](https://github.com/shad0wK1/aigc-platform/tree/main/digital-human) 维护。 MiniCPM 平台 BFF 部署在 ~/aigc-platform/digital-human/minicpm/bff，默认连接本后端的 8006。
