@@ -30,6 +30,8 @@ from musetalk.utils.blending import get_image_prepare_material, get_image_blendi
 from musetalk.utils.utils import load_all_model
 from musetalk.utils.audio_processor import AudioProcessor
 
+from muse_stream.frame_cache import read_images
+
 import shutil
 import threading
 import queue
@@ -112,12 +114,12 @@ class Avatar:
                         self.coord_list_cycle = pickle.load(f)
                     input_img_list = glob.glob(os.path.join(self.full_imgs_path, '*.[jpJP][pnPN]*[gG]'))
                     input_img_list = sorted(input_img_list, key=lambda x: int(os.path.splitext(os.path.basename(x))[0]))
-                    self.frame_list_cycle = read_imgs(input_img_list)
+                    self.frame_list_cycle = read_images(input_img_list, read_imgs)
                     with open(self.mask_coords_path, 'rb') as f:
                         self.mask_coords_list_cycle = pickle.load(f)
                     input_mask_list = glob.glob(os.path.join(self.mask_out_path, '*.[jpJP][pnPN]*[gG]'))
                     input_mask_list = sorted(input_mask_list, key=lambda x: int(os.path.splitext(os.path.basename(x))[0]))
-                    self.mask_list_cycle = read_imgs(input_mask_list)
+                    self.mask_list_cycle = read_images(input_mask_list, read_imgs)
             else:
                 print("*********************************")
                 print(f"  creating avator: {self.avatar_id}")
@@ -149,12 +151,12 @@ class Avatar:
                     self.coord_list_cycle = pickle.load(f)
                 input_img_list = glob.glob(os.path.join(self.full_imgs_path, '*.[jpJP][pnPN]*[gG]'))
                 input_img_list = sorted(input_img_list, key=lambda x: int(os.path.splitext(os.path.basename(x))[0]))
-                self.frame_list_cycle = read_imgs(input_img_list)
+                self.frame_list_cycle = read_images(input_img_list, read_imgs)
                 with open(self.mask_coords_path, 'rb') as f:
                     self.mask_coords_list_cycle = pickle.load(f)
                 input_mask_list = glob.glob(os.path.join(self.mask_out_path, '*.[jpJP][pnPN]*[gG]'))
                 input_mask_list = sorted(input_mask_list, key=lambda x: int(os.path.splitext(os.path.basename(x))[0]))
-                self.mask_list_cycle = read_imgs(input_mask_list)
+                self.mask_list_cycle = read_images(input_mask_list, read_imgs)
 
     def prepare_material(self):
         print("preparing data materials ... ...")

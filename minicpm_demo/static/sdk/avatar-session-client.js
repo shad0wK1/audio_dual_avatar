@@ -16,7 +16,7 @@ const FRAME_FLAG_KEYFRAME = 1;
 const H264_CODEC = 'avc1.4D4028';
 const AUDIO_START_BUFFER_S = 0.08;
 const AUDIO_CONTINUATION_LEAD_S = 0.012;
-const CLIENT_PREBUFFER_FRAMES = 3;
+const CLIENT_PREBUFFER_FRAMES = 9;
 const CONTINUATION_PREBUFFER_FRAMES = 2;
 const TIMELINE_SLACK_S = 0.01;
 const INTERRUPT_TIMEOUT_MS = 3000;
@@ -29,6 +29,7 @@ class AvatarCaptureProcessor extends AudioWorkletProcessor {
         this.active = false;
         this.meterSamples = 0;
         this.meterEnergy = 0;
+        this.meterAudio = new Float32Array(Math.ceil(sampleRate * 0.032) + 256);
         this.port.onmessage = ({ data }) => {
             if (data?.command === 'start') {
                 this.active = true;
@@ -51,10 +52,14 @@ class AvatarCaptureProcessor extends AudioWorkletProcessor {
         const output = outputs[0]?.[0];
         if (input && output) output.set(input);
         if (!this.active || !input?.length) return true;
+        if (this.meterSamples + input.length > this.meterAudio.length) this.meterSamples = this.meterEnergy = 0;
+        if (input.length > this.meterAudio.length) this.meterAudio = new Float32Array(input.length);
+        this.meterAudio.set(input, this.meterSamples);
         for (const sample of input) this.meterEnergy += sample * sample;
         this.meterSamples += input.length;
         if (this.meterSamples >= sampleRate * 0.032) {
-            this.port.postMessage({ type: 'level', rms: Math.sqrt(this.meterEnergy / this.meterSamples) });
+            const mic = this.meterAudio.slice(0, this.meterSamples);
+            this.port.postMessage({ type: 'level', mic, rms: Math.sqrt(this.meterEnergy / this.meterSamples) }, [mic.buffer]);
             this.meterEnergy = 0;
             this.meterSamples = 0;
         }
@@ -171,7 +176,6 @@ export class AvatarSessionClient {
         this.binaryMicrophone = binaryMicrophone;
         this.lastRemoteKind = null;
         this.lastIdlePaint = -1;
-        this.lastRemoteDrawTime = 0;
         this.responseActive = false;
         this.apiPrefix = apiPrefix.replace(/\/$/, '');
         this.ownerId = ownerId;
@@ -912,25 +916,23 @@ export class AvatarSessionClient {
         }
         const previousKind = this.lastRemoteKind;
         this.lastRemoteKind = selected.kind;
-        this.lastRemoteDrawTime = this.audioCtx.currentTime;
         const idle = this.idleVideo;
         if (idle && selected.kind === FRAME_IDLE && Number.isFinite(idle.duration) && idle.duration > 0) {
-            const phase = (selectedIndex / this.fps) % idle.duration;
-            if (!idle.seeking && (previousKind !== FRAME_IDLE || Math.abs(idle.currentTime - phase) > 0.18)) {
-                idle.currentTime = phase;
+            if (previousKind !== FRAME_IDLE) {
+                idle.currentTime = (selectedIndex / this.fps) % idle.duration;
+                this.lastIdlePaint = -1;
             }
             if (idle.paused) idle.play().catch(() => {});
         } else if (idle && !idle.paused) {
             idle.pause();
         }
-        const context = this.canvas.getContext('2d');
-        context.drawImage(
-            selected.bitmap,
-            0,
-            0,
-            this.canvas.width,
-            this.canvas.height,
-        );
+        // A local idle clip has its own uninterrupted clock. A late remote
+        // frame advances network credit without rewinding the visible clip.
+        if (!this._drawBufferedIdle()) {
+            this.canvas.getContext('2d').drawImage(
+                selected.bitmap, 0, 0, this.canvas.width, this.canvas.height,
+            );
+        }
         const firstFrame = this.lastDrawn < 0;
         this.lastDrawn = selectedIndex;
         if (firstFrame) this._emit('firstFrame', { index: selectedIndex });
@@ -942,12 +944,11 @@ export class AvatarSessionClient {
         if (!idle || this.lastRemoteKind !== FRAME_IDLE || idle.readyState < 2
             || idle.seeking || idle.paused || this.discardUntilFlush) return false;
         const now = this.audioCtx.currentTime;
-        if (now - this.lastRemoteDrawTime < 2 / this.fps) return false;
         const current = this.segments[this.currentIndex];
         if (current?.startAt != null && now >= current.startAt
             && now < current.startAt + current.duration) return false;
         const frame = Math.floor(idle.currentTime * this.fps);
-        if (this.lastIdlePaint === frame) return false;
+        if (this.lastIdlePaint === frame) return true;
         this.lastIdlePaint = frame;
         this.canvas.getContext('2d').drawImage(idle, 0, 0, this.canvas.width, this.canvas.height);
         // The ACK clock tracks server frames only.
@@ -1026,6 +1027,8 @@ export class AvatarSessionClient {
             audio: {
                 channelCount: 1,
                 echoCancellation: true,
+                noiseSuppression: true,
+                autoGainControl: false,
                 ...(this.microphoneDeviceId
                     ? { deviceId: { exact: this.microphoneDeviceId } }
                     : {}),
@@ -1049,6 +1052,14 @@ export class AvatarSessionClient {
             URL.revokeObjectURL(workletUrl);
         }
         if (this.closed) throw new Error('Avatar session is closed');
+        // A tap on the actual output includes Web Audio gain and scheduling.
+        const playback = this.audioCtx.createAnalyser();
+        playback.fftSize = Math.min(32768, 2 ** Math.ceil(Math.log2(this.audioCtx.sampleRate * 0.32)));
+        this.gain.connect(playback);
+        const reference = new Float32Array(playback.fftSize);
+        const preroll = [];
+        const assistantSpeaking = () => this.responseActive || this.scheduleCursor < this.segments.length
+            || (this.audioScheduleEnd > 0 && this.audioScheduleEnd + 0.18 > this.audioCtx.currentTime);
         const source = context.createMediaStreamSource(stream);
         const node = new AudioWorkletNode(context, 'avatar-session-capture', {
             processorOptions: { chunkSize: Math.round(context.sampleRate / 5) },
@@ -1063,10 +1074,15 @@ export class AvatarSessionClient {
         node.port.onmessage = ({ data }) => {
             if (data?.type === 'level') {
                 if (this.speechInterruptor && this.micActive && !this.closed) {
-                    const speaking = !this.discardUntilFlush && (this.responseActive
-                        || this.scheduleCursor < this.segments.length
-                        || this.audioScheduleEnd > this.audioCtx.currentTime);
-                    this.speechInterruptor.update(data.rms, speaking, this.muted);
+                    const speaking = !this.discardUntilFlush && assistantSpeaking();
+                    let echo = false;
+                    if (speaking && !this.muted && data.rms >= 0.012) {
+                        playback.getFloatTimeDomainData(reference);
+                        echo = this.speechInterruptor.matchesPlayback?.(
+                            data.mic, context.sampleRate, reference, this.audioCtx.sampleRate,
+                        ) || false;
+                    }
+                    this.speechInterruptor.update(data.rms, speaking, this.muted, echo, data.mic, context.sampleRate);
                 }
                 return;
             }
@@ -1098,17 +1114,36 @@ export class AvatarSessionClient {
                 return;
             }
             const forceListen = !this.muted && Boolean(this.speechInterruptor?.forceListen());
-            if (this.binaryMicrophone) {
-                this.ws.send(_microphonePacket(samples, forceListen, energy === 0));
-                this.sequence++;
-                return;
+            const send = (pcm, force, silent) => {
+                if (this.binaryMicrophone) {
+                    this.ws.send(_microphonePacket(pcm, force, silent));
+                    this.sequence++;
+                } else {
+                    this.ws.send(JSON.stringify({
+                        type: 'input.audio.append', sequence: this.sequence++,
+                        force_listen: force, audio: _arrayBufferToBase64(pcm.buffer),
+                    }));
+                }
+            };
+            const playing = assistantSpeaking();
+            if (this.muted) {
+                preroll.length = 0;
+                send(new Float32Array(samples.length), false, true);
+            } else if (this.speechInterruptor && playing && !forceListen) {
+                // Keep the onset of a possible interruption locally. Prevent
+                // unconfirmed loudspeaker audio from reaching cloud recognition.
+                if (this.speechInterruptor.speechSince !== null) {
+                    preroll.push(samples);
+                    if (preroll.length > 2) preroll.shift();
+                } else {
+                    preroll.length = 0;
+                }
+                send(new Float32Array(samples.length), false, true);
+            } else {
+                if (forceListen) for (const chunk of preroll) send(chunk, true, false);
+                preroll.length = 0;
+                send(samples, forceListen, energy === 0);
             }
-            this.ws.send(JSON.stringify({
-                type: 'input.audio.append',
-                sequence: this.sequence++,
-                force_listen: forceListen,
-                audio: _arrayBufferToBase64(samples.buffer),
-            }));
         };
         this.micCtx = context;
         this.micStream = stream;

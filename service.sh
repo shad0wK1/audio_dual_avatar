@@ -7,6 +7,7 @@ export OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE
 case "$1" in
 muse)
     set -a; source "$root/.avatar-env"; set +a
+    export AVATAR_SYSTEM_PRESETS="$root/minicpm_demo/assets/avatar_presets.yaml"
     export CUDA_VISIBLE_DEVICES="$MUSETALK_CUDA_VISIBLE_DEVICES"
     export XDG_CACHE_HOME="$root/musetalk_project/.cache" HF_HOME="$root/musetalk_project/.cache/huggingface" TORCH_HOME="$root/musetalk_project/.cache/torch"
     export MPLCONFIGDIR="$root/.run/matplotlib" VIRTUAL_ENV="$root/.venv"

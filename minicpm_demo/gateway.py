@@ -2126,6 +2126,12 @@ async def avatar_preset_ref_audio(preset_id: str, request: Request):
 
 @app.post("/avatar-live/api/avatar-presets/{preset_id}/activate")
 async def avatar_preset_activate(preset_id: str, request: Request):
+    warmup = request.query_params.get("warmup") == "1"
+    if warmup:
+        try:
+            _avatar_session_service_or_503().require_api_key(_request_api_key(request))
+        except AvatarSessionError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
     base = avatar_http_url()
     if not base:
         raise HTTPException(status_code=404, detail="avatar disabled")
@@ -2160,6 +2166,7 @@ async def avatar_preset_activate(preset_id: str, request: Request):
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.post(
                 f"{base}/api/avatar/select",
+                params={"warmup": "1"} if warmup else {},
                 json={"avatar_id": item["avatar_id"]},
             )
     except httpx.HTTPError as exc:

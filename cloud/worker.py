@@ -5,6 +5,8 @@ import uuid
 from collections import deque
 from contextlib import suppress
 from time import monotonic
+from pathlib import Path
+from functools import lru_cache
 
 import httpx
 import numpy as np
@@ -17,19 +19,43 @@ from .providers import Providers, ProviderError, settings, log_stage, response_l
 app = FastAPI()
 logger = logging.getLogger("uvicorn.error")
 active = False
-FRAME = 320  # 20 ms at 16 kHz
-END_SILENCE_FRAMES = 40  # 800 ms allows a short pause within a sentence.
+FRAME = 512  # Silero at 16 kHz uses 32 ms windows.
+END_SILENCE_FRAMES = 25
+
+SPOKEN_REPLY_FORMAT = """你的回答会直接交给语音合成引擎实时朗读，面向听众的最终输出必须严格遵守以下规范：
+
+只输出可以直接念出来的纯文本自然段，用普通标点表达停顿。严禁输出 Markdown、HTML、代码块、表格、括号注释以及 Emoji 表情，即使用户要求排版或写代码，也只用口语概括核心逻辑。
+
+保持全双工实时对话节奏：单句尽量不超过 20 个字，第一句话简短直接，多用句号、问号和感叹号及时断句。每次回答尽量在 3 到 4 句话内讲清重点，内容复杂时先给结论，再问用户是否需要展开；遇到没说完的半句输入，用简短语气词自然承接。
+
+语言风格贴近真人日常交谈，适当使用“其实”“不过”“嗯”等过渡词增加呼吸感。分点时用“首先”“其次”“最后”串起，强调时用措辞而非符号。遇到公式、数字比例、网址或引用来源，全部转化为听众能直接听懂的口语汉字读法，不附带链接或脚注。"""
+
+
+@lru_cache(maxsize=1)
+def speech_model():
+    import onnxruntime as ort
+
+    path = Path(__file__).resolve().parents[1] / "minicpm_demo/assets/vad_model/silero_vad.onnx"
+    options = ort.SessionOptions()
+    options.inter_op_num_threads = options.intra_op_num_threads = 1
+    return ort.InferenceSession(str(path), options, providers=["CPUExecutionProvider"])
 
 
 class Utterances:
     def __init__(self):
         self.remainder = np.empty(0, dtype="<f4")
-        self.lead = deque(maxlen=10)
+        self.model = speech_model()
+        self.sample_rate = np.array(16000, dtype=np.int64)
+        self.h = np.zeros((2, 1, 64), dtype=np.float32)
+        self.c = np.zeros_like(self.h)
+        self.lead = deque(maxlen=8)
         self.frames = []
         self.voiced = self.quiet = 0
 
     def reset_for_interrupt(self):
-        # The detector can hear the first 180 ms of a new word before the
+        self.h.fill(0)
+        self.c.fill(0)
+        # The detector can hear the beginning of a new word before the
         # interrupt reaches us. Keep this short prefix for the next utterance.
         if self.frames:
             self.lead.clear()
@@ -42,7 +68,10 @@ class Utterances:
         end = len(audio) // FRAME * FRAME
         self.remainder = audio[end:].copy()
         for frame in audio[:end].reshape(-1, FRAME):
-            voiced = np.mean(frame ** 2) >= 0.009 ** 2
+            probability, self.h, self.c = self.model.run(None, {
+                "input": frame[None, :], "sr": self.sample_rate, "h": self.h, "c": self.c,
+            })
+            voiced = probability.item() >= (0.38 if self.frames else 0.60)
             pcm = (np.clip(frame, -1, 1) * 32767).astype("<i2").tobytes()
             if not self.frames:
                 if not voiced:
@@ -53,8 +82,8 @@ class Utterances:
             self.frames.append(pcm)
             self.voiced += int(voiced)
             self.quiet = 0 if voiced else self.quiet + 1
-            if self.quiet >= END_SILENCE_FRAMES or len(self.frames) >= 1500:
-                result = b"".join(self.frames) if self.voiced >= 5 else None
+            if self.quiet >= END_SILENCE_FRAMES or len(self.frames) >= 938:
+                result = b"".join(self.frames) if self.voiced >= 4 else None
                 self.frames.clear()
                 self.voiced = self.quiet = 0
                 if result:
@@ -65,7 +94,7 @@ class Conversation:
     def __init__(self, providers, send, prompt, voice):
         self.providers = providers
         self.send = send
-        self.prompt = prompt
+        self.prompt = f"{prompt}\n\n{SPOKEN_REPLY_FORMAT}"
         self.voice = voice
         self.history = deque(maxlen=11)  # Ten previous turns plus the current question.
         self.background = set()
