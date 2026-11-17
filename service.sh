@@ -12,12 +12,13 @@ muse)
     export MPLCONFIGDIR="$root/.run/matplotlib" VIRTUAL_ENV="$root/.venv"
     cd "$root/musetalk_project/MuseTalk"
     export FFMPEG_PATH="$PWD/ffmpeg-4.4-amd64-static" PATH="$root/.venv/bin:$PWD/ffmpeg-4.4-amd64-static:$PATH"
-    exec "$py" stream_server.py --config "$root/musetalk.yaml" ;;
+    exec "$py" -m muse_stream.on_demand "$root/musetalk.yaml" ;;
 worker)
     exec "$py" -m uvicorn cloud.worker:app --host 127.0.0.1 --port 22410 --no-access-log ;;
 gateway)
     source "$root/.avatar-env"
     export AVATAR_BRIDGE_URL=ws://127.0.0.1:8100/ws/minicpm AVATAR_HTTP_URL=http://127.0.0.1:8100
+    export AVATAR_GPU_ON_DEMAND=1
     export ENABLE_PUBLIC_ADMIN=0 AVATAR_CUSTOMIZATION_ENABLED=false
     cd "$root/minicpm_demo"
     export PYTHONPATH="$root:$PWD"

@@ -11,10 +11,12 @@ import asyncio
 import base64
 import json
 import logging
+import os
 import secrets
 import struct
 import time
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 from urllib.parse import urlencode
@@ -411,6 +413,8 @@ class _AvatarSessionRuntime:
         self.service = service
         self.session = session
         self.websocket = websocket
+        self.render_http = service.avatar_http_url
+        self.render_bridge = service.bridge_url
         self.worker_ws: Any = None
         self.viewer_ws: Any = None
         self.bridge: Optional[AvatarBridge] = None
@@ -460,8 +464,9 @@ class _AvatarSessionRuntime:
             self.video_codec = self._choose_codec(
                 start.get("capabilities", {}).get("video_codecs")
             )
-            await self._connect_pipeline()
-            await self._run_relays()
+            async with self._hold_renderer():
+                await self._connect_pipeline()
+                await self._run_relays()
         except AvatarSessionError as exc:
             await self._send_error(exc.code, str(exc))
         except WebSocketDisconnect:
@@ -476,6 +481,23 @@ class _AvatarSessionRuntime:
             await self._send_error("avatar_session_failed", str(exc))
         finally:
             await self._cleanup()
+
+    @asynccontextmanager
+    async def _hold_renderer(self):
+        if os.getenv("AVATAR_GPU_ON_DEMAND") != "1":
+            yield
+            return
+
+        url = _ws_url(self.service.avatar_http_url, "/ws/runtime?") + urlencode(
+            {"avatar_id": self.session.avatar_id})
+        async with websockets.connect(url, open_timeout=10, ping_timeout=60) as lease:
+            result = json.loads(await asyncio.wait_for(lease.recv(), timeout=150))
+            if not result.get("ready"):
+                raise AvatarSessionError(result.get("error") or "数字人渲染器未就绪",
+                                         status_code=503, code="renderer_unavailable")
+            self.render_http = result["http"]
+            self.render_bridge = _ws_url(self.render_http, "/ws/minicpm")
+            yield
 
     def _choose_codec(self, supported: Any) -> str:
         values = {
@@ -499,7 +521,7 @@ class _AvatarSessionRuntime:
         self.started_at = time.monotonic()
 
         self.bridge = AvatarBridge(
-            self.service.bridge_url,
+            self.render_bridge,
             label=f"public:{self.session.id}",
         )
         self.bridge.start()
@@ -548,7 +570,7 @@ class _AvatarSessionRuntime:
         self.meta = created
 
         viewer_url = _ws_url(
-            self.service.avatar_http_url,
+            self.render_http,
             f"/ws/live?video_codec={self.video_codec}",
         )
         self.viewer_ws = await websockets.connect(
@@ -1004,7 +1026,7 @@ class _AvatarSessionRuntime:
     ) -> None:
         try:
             response = await self.http_client.get(
-                f"{self.service.avatar_http_url}"
+                f"{self.render_http}"
                 f"/api/live/audio/{segment_id}"
             )
             response.raise_for_status()

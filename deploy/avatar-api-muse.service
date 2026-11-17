@@ -1,0 +1,11 @@
+[Unit]
+Description=Digital avatar API muse
+[Service]
+WorkingDirectory=%h/audio_dual_avatar_api
+ExecStart=%h/audio_dual_avatar_api/service.sh muse
+OOMPolicy=continue
+Restart=always
+RestartSec=2
+TimeoutStopSec=15
+[Install]
+WantedBy=default.target

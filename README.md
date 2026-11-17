@@ -28,3 +28,11 @@ tests/mock_worker.py 和 tests/verify_avatar.py 是离线联调入口，只在�
 平台网页、BFF、登录对接和反向代理由 [aigc-platform 数字人目录](https://github.com/shad0wK1/aigc-platform/tree/main/digital-human) 维护。 API 版 BFF 使用 18180，连接本后端的 8106。现有机器用 ~/aigc-platform/digital-human/api/platform.sh 联动启停平台和后端，或用本目录的 ./run.sh 单独启停后端。
 
 DeepSeek 默认每轮开启 low 思考，按需开放联网查询。路由在 cloud/routing.py，请求参数在 cloud/providers.py。打断时保留用户问题，并根据浏览器实际播放进度保留可确认的回答，逻辑在 cloud/history.py。
+
+## 空闲显存与服务生命周期
+
+`./run.sh start` 启用三个用户级 systemd 服务并随系统启动。`./run.sh stop` 停止服务并取消自启。
+待机时可读取角色和预览；公开会话发送 `session.start` 后才加载 CUDA 渲染器。
+最后一个渲染连接断开 60 秒后回收渲染子进程及 CUDA 上下文。活动会话即使静音也保留显存。
+GPU 机执行 `curl http://127.0.0.1:8100/api/status`，查看 `status`、`gpu_resident` 和 `active_render_leases`。
+平台 BFF 的 prepare 校验须接受已验证角色的 `standby` 状态；加载期间仍需等待。

@@ -10,7 +10,7 @@ stop() {
     for part in gateway worker muse; do
         name=$(unit "$part")
         if systemctl --user show "$name" -p LoadState --value | grep -qv '^not-found$'; then
-            systemctl --user stop "$name"
+            systemctl --user disable --now "$name"
         fi
     done
 }
@@ -27,6 +27,13 @@ start)
     mkdir -p .run
     exec 9>".run/start.lock"
     flock -n 9 || { echo "另一个启动操作正在进行"; exit 1; }
+    unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+    mkdir -p "$unit_dir"
+    for part in "${parts[@]}"; do
+        name=$(unit "$part")
+        ln -sfn "$root/deploy/$name" "$unit_dir/$name"
+    done
+    systemctl --user daemon-reload
     started=()
     rollback() {
         for ((i=${#started[@]}-1; i>=0; i--)); do systemctl --user stop "${started[i]}" || true; done
@@ -41,19 +48,20 @@ start)
         esac
         if ! systemctl --user is-active --quiet "$name"; then
             if ss -Hltn "sport = :$port" | grep -q .; then echo "端口 $port 已占用"; rollback; exit 1; fi
-            systemd-run --user --collect --unit="$name" -p "WorkingDirectory=$root" -p TimeoutStopSec=15 "$root/service.sh" "$part"
+            systemctl --user start "$name"
             started+=("$name")
         fi
         ready=false
         for i in $(seq 1 180); do
             systemctl --user is-active --quiet "$name" || break
             if data=$(curl -kfsS --max-time 2 "$health" 2>/dev/null); then
-                if [[ "$part" != muse ]] || "$py" -c 'import json,sys;sys.exit(not json.load(sys.stdin).get("ready"))' <<<"$data"; then ready=true; break; fi
+                if [[ "$part" != muse ]] || "$py" -c 'import json,sys;s=json.load(sys.stdin);sys.exit(not (s.get("ready") or s.get("status")=="standby"))' <<<"$data"; then ready=true; break; fi
             fi
             sleep 1
         done
         if [[ "$ready" != true ]]; then echo "启动失败，请查看 journalctl --user -u $name"; rollback; exit 1; fi
     done
+    for part in "${parts[@]}"; do systemctl --user enable "$(unit "$part")"; done
     echo 'API gateway ready: https://127.0.0.1:8106/avatar-v2' ;;
 *) echo "Usage: $0 {check|start|status|stop}"; exit 2 ;;
 esac
