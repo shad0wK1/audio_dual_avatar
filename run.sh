@@ -24,7 +24,6 @@ status)
 stop) stop ;;
 start)
     check
-    mkdir -p .run
     exec 9>".run/start.lock"
     flock -n 9 || { echo "另一个启动操作正在进行"; exit 1; }
     unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"

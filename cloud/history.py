@@ -71,7 +71,7 @@ class Turn:
                 played_samples -= samples
                 continue
             pcm = bytes(phrase.pcm[:played_samples * 2])
-            if len(pcm) >= 2400 and np.max(np.abs(np.frombuffer(pcm, "<i2").astype("i4"))) >= 160:
+            if phrase.text and len(pcm) >= 2400 and np.max(np.abs(np.frombuffer(pcm, "<i2").astype("i4"))) >= 160:
                 self.partial = spawn(self._recognize_prefix(recognize, pcm, phrase.text))
             break
         if not completed_answer or self.answer != completed_answer or self.partial is not None:

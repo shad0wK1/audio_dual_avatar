@@ -10,6 +10,7 @@ from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from ..inference.restoration import gpen_enabled
 from ..avatar_registry import (
     AvatarError,
     activate_avatar,
@@ -69,17 +70,25 @@ async def status(request: Request) -> dict[str, Any]:
         and state.pipeline.media_ack_frame >= latest_media_end_frame
     )
     args = state.args
+    restorer = getattr(state.model.runtime, "face_restorer", None)
+    restoration = restorer.status() if restorer is not None else {
+        "mode": "gpen" if gpen_enabled() else "off", "loaded": False,
+    }
+    restoration_error = restoration.get("error")
+    if restoration.get("alive") is False and not restoration_error:
+        restoration_error = "GPEN worker is not running"
     return {
-        "status": state.service.status,
-        "ready": state.service.ready,
-        "error": state.service.error,
-        "accepting_streams": state.service.accepting_streams,
+        "status": "restoration_error" if restoration_error else state.service.status,
+        "ready": state.service.ready and not restoration_error and not state.service.exit_requested,
+        "error": state.service.error or restoration_error,
+        "accepting_streams": state.service.accepting_streams and not restoration_error,
         "avatar_id": state.model.avatar_id,
         "default_avatar_id": state.model.default_avatar_id,
         "avatar_revision": state.model.avatar_revision,
         "avatar_ready": state.model.avatar_ready,
         "avatar_switching": state.model.avatar_switching,
         "fps": state.model.fps,
+        "face_restoration": restoration,
         "batch_size": args.batch_size if args else state.model.batch_size,
         "prebuffer": state.model.prebuffer,
         "width": state.model.width,

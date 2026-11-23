@@ -92,6 +92,8 @@ def build_runtime(args: Namespace) -> Runtime:
         weight_dtype=weight_dtype,
     )
     warmup(runtime, args)
+    from .inference.restoration import build_face_restorer
+    runtime.face_restorer = build_face_restorer(runtime.device)
     return runtime
 
 
@@ -214,13 +216,15 @@ def build_avatar(
         raise ValueError("avatar.preparation must be auto/reuse (or true/false)")
 
     log(f"avatar cache: {cache_dir} (preparation={preparation})")
-    return _instantiate_avatar(
+    avatar = _instantiate_avatar(
         args,
         avatar_id=avatar_id,
         video_path=video_path,
         bbox_shift=bbox_shift,
         preparation=preparation,
     )
+    from .inference.restoration import attach_avatar_restoration
+    return attach_avatar_restoration(avatar, runtime, cache_dir)
 
 
 def load_cached_avatar(
@@ -253,7 +257,8 @@ def load_cached_avatar(
     # Complete the first audio-to-video inference warmup while the switch
     # still owns the avatar lock and before clients see avatar_ready.
     warmup(runtime, args)
-    return avatar
+    from .inference.restoration import attach_avatar_restoration
+    return attach_avatar_restoration(avatar, runtime, cache_dir)
 
 
 def _configure_avatar_runtime(args: Namespace, runtime: Runtime) -> None:

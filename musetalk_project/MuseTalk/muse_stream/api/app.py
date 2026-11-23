@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
@@ -11,7 +14,15 @@ from . import audio_websocket, routes, websocket
 
 
 def create_app(state: AppState) -> FastAPI:
-    app = FastAPI(title="MuseTalk Streaming Preview")
+    @asynccontextmanager
+    async def lifespan(app):
+        try:
+            yield
+        finally:
+            from ..lifecycle import shutdown
+            await asyncio.to_thread(shutdown, state)
+
+    app = FastAPI(title="MuseTalk Streaming Preview", lifespan=lifespan)
     app.state.stream_state = state
     app.mount("/static", StaticFiles(directory=str(WEB_DIR)), name="static")
 

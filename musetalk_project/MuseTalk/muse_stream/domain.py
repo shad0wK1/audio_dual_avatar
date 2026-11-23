@@ -53,3 +53,4 @@ class Runtime:
     feature_worker: ThreadPoolExecutor = field(default_factory=lambda: ThreadPoolExecutor(
         max_workers=1, thread_name_prefix="avatar-features",
     ))
+    face_restorer: Any = None

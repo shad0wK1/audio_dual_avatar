@@ -4,12 +4,10 @@ import base64
 import json
 import os
 import ssl
-from pathlib import Path
 from urllib.parse import urlsplit
 
 import httpx
 import numpy as np
-import soundfile as sf
 import websockets
 
 
@@ -47,11 +45,9 @@ async def main():
         ready = await control("session.ready")
         assert ready["video_codec"] == "h264"
         for turn in (1,2):
-            # A real voiced fixture must pass VAD, followed by end-of-turn silence.
-            voice = Path(__file__).resolve().parents[1] / "minicpm_demo/assets/ref_audio/ref_avatar_default.wav"
-            samples, rate = sf.read(voice, frames=32000, dtype="float32", always_2d=True)
-            assert rate == 16000
-            pcm = np.pad(samples.mean(axis=1), (0, 20000)).astype("<f4")
+            # Send a microphone envelope with enough trailing silence to close the turn.
+            pcm=np.zeros(24000,dtype="<f4")
+            pcm[:6400]=np.sin(np.arange(6400)*0.074)*0.12
             await send({"type":"input.audio.append","audio":base64.b64encode(pcm.tobytes()).decode()})
             text = ""
             wav_ids, video_ids = set(), set()

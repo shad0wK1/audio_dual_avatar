@@ -162,6 +162,10 @@ def inspect_avatar_cache(avatar_id: str, version: str) -> AvatarCacheInfo:
                 f"Frame/mask count mismatch: {len(frame_files)}/{len(mask_files)}"
             )
 
+        from .inference.restoration import gpen_enabled, load_alignment_cache
+        if gpen_enabled():
+            load_alignment_cache(cache_dir, len(frame_files))
+
         import cv2
         import torch
 

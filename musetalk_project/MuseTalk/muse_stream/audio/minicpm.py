@@ -120,6 +120,7 @@ class MiniCPMBridgeSession(StreamAudioSession):
                 await self._on_audio(
                     message.get("response_id"),
                     message.get("audio"),
+                    opening_end=message.get("opening_end") is True,
                 )
             elif delta == "listen" and self.turn_open:
                 await self._end_turn("listen")
@@ -130,7 +131,7 @@ class MiniCPMBridgeSession(StreamAudioSession):
         elif kind == "ping":
             await self.websocket.send_json({"type": "pong"})
 
-    async def _on_audio(self, response_id: Any, audio_b64: Any) -> None:
+    async def _on_audio(self, response_id: Any, audio_b64: Any, *, opening_end: bool = False) -> None:
         if not audio_b64:
             return
         if response_id is not None and response_id == self.flushed_response_id:
@@ -150,6 +151,13 @@ class MiniCPMBridgeSession(StreamAudioSession):
         assert self.resampler is not None
         resampled = self.resampler.resample_chunk(samples)
         await self._handle_pcm(self._to_pcm16(resampled))
+        if opening_end:
+            # The next samples can arrive several seconds later, after search.
+            # Drain this phrase without ending the turn or resetting its cursor.
+            await self._drain_resampler()
+            self.resampler.clear()
+            await self._flush(phrase_end=True)
+            log(f"search opening submitted: frames={self.frames_submitted}")
 
     def _start_turn(self, response_id: Any) -> None:
         import soxr
@@ -169,16 +177,16 @@ class MiniCPMBridgeSession(StreamAudioSession):
         self.turns += 1
         log(f"minicpm turn start: response_id={response_id}")
 
+    async def _drain_resampler(self) -> None:
+        tail = self.resampler.resample_chunk(np.empty(0, dtype=np.float32), last=True)
+        if tail.size:
+            await self._handle_pcm(self._to_pcm16(tail))
+
     async def _end_turn(self, reason: str) -> None:
         if not self.turn_open:
             return
         if self.resampler is not None:
-            tail = self.resampler.resample_chunk(
-                np.zeros(0, dtype=np.float32),
-                last=True,
-            )
-            if tail.size:
-                await self._handle_pcm(self._to_pcm16(tail))
+            await self._drain_resampler()
         await self._flush(final=True)
         # The worker stops holding frames after the final window.
         if self.last_segment is not None:

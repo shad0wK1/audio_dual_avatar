@@ -440,7 +440,7 @@ class StreamAudioSession:
             }
         )
 
-    async def _flush(self, final: bool = False) -> None:
+    async def _flush(self, final: bool = False, *, phrase_end: bool = False) -> None:
         if len(self.buffer) < 2:
             return
         frame_samples = math.ceil(self.sample_rate / self.state.model.fps)
@@ -460,6 +460,18 @@ class StreamAudioSession:
             self._advance_left_context(core_raw)
 
         remaining_samples = len(self.buffer) // 2
+        if phrase_end and remaining_samples:
+            # Send every real sample now, including a sub-frame tail. Round the
+            # cumulative video clock, then let _next_window realign the next
+            # full window. The zeros supply analysis context only, never audio.
+            end_frame = round((self.samples_submitted + remaining_samples)
+                              * self.state.model.fps / self.sample_rate)
+            frames = max(1, end_frame - self.frames_submitted)
+            core_raw = bytes(self.buffer)
+            self.buffer.clear()
+            await self._submit_window(core_raw, bytes(frame_samples * 2), frames)
+            self._advance_left_context(core_raw)
+            return
         if remaining_samples < frame_samples:
             self.state.stream_input.dropped_samples += remaining_samples
             self.buffer.clear()

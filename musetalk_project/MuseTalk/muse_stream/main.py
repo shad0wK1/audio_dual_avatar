@@ -7,7 +7,7 @@ import sys
 import threading
 
 from .config import build_parser, configure_state, load_config
-from .lifecycle import initialize
+from .lifecycle import initialize, shutdown
 from .log import log
 from .state import AppState
 
@@ -27,7 +27,10 @@ def run(state: AppState, app) -> None:
     )
     server = uvicorn.Server(config)
     state.service.uvicorn_server = server
-    server.run()
+    try:
+        server.run()
+    finally:
+        shutdown(state)
     log("uvicorn stopped; forcing process exit")
     try:
         sys.stdout.flush()

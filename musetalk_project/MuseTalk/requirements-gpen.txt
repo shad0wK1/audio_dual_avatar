@@ -1,0 +1,3 @@
+# Optional runtime dependency for the official GPEN CUDA operators.
+# PyTorch/CUDA are already supplied by the main runtime environment.
+ninja==1.13.2

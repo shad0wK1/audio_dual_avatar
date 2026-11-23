@@ -12,7 +12,7 @@ from typing import Any
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from ..audio.segments import InterruptManager
-from ..inference.workers import live_encode_worker, live_infer_worker
+from ..inference.workers import live_encode_worker, live_infer_worker, live_restore_worker
 from ..log import log
 from ..protocol import FRAME_HEADER, frame_pts_us
 from ..state import AppState
@@ -31,6 +31,7 @@ class LiveStreamSession:
         self.network_queue: asyncio.Queue | None = None
         self.raw_queue: asyncio.Queue | None = None
         self.stop = threading.Event()
+        self.restorer: threading.Thread | None = None
         self.encoder: threading.Thread | None = None
         self.inference: threading.Thread | None = None
         self.acked_frame = -1
@@ -141,11 +142,23 @@ class LiveStreamSession:
         self.raw_queue = asyncio.Queue(
             maxsize=max(16, args.batch_size * 2)
         )
+        encoder_input = self.raw_queue
+        if (self.stream_format in ("h264", "h264_annexb")
+                and os.getenv("AVATAR_H264_BACKEND", "pyav") != "ffmpeg"
+                and getattr(state.model.runtime, "face_restorer", None) is not None):
+            # Only small face crops run ahead of encoding. Keep the queue
+            # bounded for low-latency interrupts and propagate controls in order.
+            encoder_input = asyncio.Queue(maxsize=4)
+            self.restorer = threading.Thread(
+                target=live_restore_worker,
+                args=(state, self.raw_queue, encoder_input, loop, self.stop),
+                daemon=True,
+            )
         self.encoder = threading.Thread(
             target=live_encode_worker,
             args=(
                 state,
-                self.raw_queue,
+                encoder_input,
                 self.network_queue,
                 loop,
                 self.stop,
@@ -212,6 +225,8 @@ class LiveStreamSession:
             assert self.encoder is not None and self.inference is not None
             assert self.network_queue is not None
             self.encoder.start()
+            if self.restorer is not None:
+                self.restorer.start()
             self.inference.start()
 
             while True:
@@ -375,10 +390,11 @@ class LiveStreamSession:
                         frame_queue.get_nowait()
                 except asyncio.QueueEmpty:
                     pass
-            if self.inference is not None:
-                self.inference.join(timeout=3)
-            if self.encoder is not None:
-                self.encoder.join(timeout=3)
+            # Workers submit queue operations to this event loop while they
+            # wind down. Keep it running until they release the session.
+            workers = (self.inference, self.restorer, self.encoder)
+            await asyncio.gather(*(asyncio.to_thread(worker.join, 3)
+                                   for worker in workers if worker is not None))
             state.viewer.connected = False
             state.viewer.playback_started = False
             log("live viewer disconnected")

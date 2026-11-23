@@ -21,13 +21,21 @@ check 仅检查本地配置。启动后服务仅监听环回地址。网关 HTTP
 
 tests/mock_worker.py 和 tests/verify_avatar.py 是离线联调入口，只在独立测试 worker 中用 HTTP fixtures 替换供应商响应。生产启动入口固定加载 cloud.worker，不会自动回退为模拟数据。
 
-## 从 API 分支部署
+## 2026-11-23 后端更新
 
-部署目录为 ~/audio_dual_avatar_api，共享依赖来自同机 ~/audio_dual_avatar 的 main 分支部署。运行前从 .env.example 创建仅服务用户可读写的 .env。将 .avatar-env 配置成与本机 GPU 和平台网关凭据一致；服务脚本会读取此文件。按现有部署链接 .venv、.venv-preprocess、MuseTalk 的 models 和 ffmpeg，提供 MuseTalk 预处理的形象缓存以及 minicpm_demo/certs 下的服务器证书和私钥。
+- **DeepSeek 双请求均为 SSE 流式。** 第一请求实时接收联网路由标签，只有完整标签校验通过后才启动回答。第二请求持续转发正文，首个可播短句到达后即可合成语音。
+- **按问题复杂度选择联网模式。** 单一机构规则、官方渠道和单一货币对的公开参考汇率走快速联网回答。天气、市场行情、跨来源比较和复杂问题保留低强度深度检索。直答和深度检索使用 low 思考，快速联网回答关闭思考。
+- **改进检索证据与日期核对。** 提示模型优先使用主管机构或原始来源，核心事实已经有依据时减少继续打开网页。联网搜索没有返回可用来源时，快速回答会在播报前回退到深度检索。按日天气预报还会核对来源是否覆盖目标日期。
+- **增加联网语音过渡提示。** 搜索开始时随机播放一条简短提示，并与检索并行。正式答案排在提示后播放。`cloud/search_audio/` 中包含当前四条提示按 Cherry、Serena、Chelsie 三种音色预先合成的 PCM。未命中的音色会实时合成提示。过渡提示计入浏览器播放进度，但不会写入对话历史。
+- **加强口播回答要求。** 通用系统提示要求结论准确、术语合适、数字带日期与单位、说明时效信息口径，并区分事实、估计和建议。默认小鹿角色提示仍位于 `minicpm_demo/assets/prompts/avatar/gril_v2.txt`。
+- **更新语音端点检测与渲染预热。** worker 用 20 毫秒帧和约 800 毫秒静音判定一句话结束，并通过音频能量检测语音。MuseTalk 启动时预热常用形象帧缓存，最大预取窗口从 3.5 秒降到 1.5 秒。服务脚本支持把 GPEN 放到独立 GPU 上运行。
+- **补充路由、日期、过渡播放回归用例。** 新用例位于 `tests/test_deepseek_router.py`、`tests/test_search_route.py`、`tests/test_weather_dates.py` 和 `tests/test_web_opening.py`。
 
-平台网页、BFF、登录对接和反向代理由 [aigc-platform 数字人目录](https://github.com/shad0wK1/aigc-platform/tree/main/digital-human) 维护。 API 版 BFF 使用 18180，连接本后端的 8106。现有机器用 ~/aigc-platform/digital-human/api/platform.sh 联动启停平台和后端，或用本目录的 ./run.sh 单独启停后端。
+部署 MuseTalk 服务前，按机器配置从 `.gpen-env.example` 创建本机私有的 `.gpen-env`。GPEN 模型权重由部署环境提供，文件不入库，SHA-256 记录在 `weights.sha256`。`.gpen-env`、服务密钥、网关配置、TLS 私钥和模型权重不应提交到仓库。
 
-DeepSeek 默认每轮开启 low 思考，按需开放联网查询。路由在 cloud/routing.py，请求参数在 cloud/providers.py。打断时保留用户问题，并根据浏览器实际播放进度保留可确认的回答，逻辑在 cloud/history.py。
+## 平台数字人前端
+
+平台网页、BFF、登录对接和反向代理由 [aigc-platform 数字人目录](https://github.com/shad0wK1/aigc-platform/tree/main/digital-human) 维护。 此版本部署在 ~/aigc-platform/digital-human/api/。
 
 ## 空闲显存与服务生命周期
 

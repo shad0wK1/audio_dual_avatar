@@ -1,6 +1,7 @@
 # Local secrets and environment
 .avatar-env
 .avatar-env.local
+.gpen-env
 .env
 .env.local
 .env.*.local

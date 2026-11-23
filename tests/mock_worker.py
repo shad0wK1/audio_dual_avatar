@@ -34,6 +34,9 @@ def upstream(req):
         return httpx.Response(200, json={"choices": [{"message": {"content": f"测试第{sequence}轮"}}]})
     if req.url.path == "/chat/completions":
         assert req.headers["Authorization"] == "Bearer offline-deepseek"
+        assert body["stream"]
+        if body.get("max_tokens") == 16:
+            return sse([{"choices": [{"delta": {"content": "DIRECT"}, "finish_reason": "stop"}]}])
         assert "小鹿" in body["messages"][0]["content"]
         assert body["messages"][-1]["content"] == f"测试第{sequence}轮"
         return sse([{"choices": [{"delta": {"content": f"第{sequence}轮回答。"}, "finish_reason": None}]},

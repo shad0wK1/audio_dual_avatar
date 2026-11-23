@@ -372,6 +372,27 @@ def live_infer_worker(
 
 
 
+def live_restore_worker(state, raw_queue, restored_queue, loop, stop):
+    """Restore generated crops in order while the prior frame is encoded."""
+    pipeline = InferencePipeline(state)
+    try:
+        while not stop.is_set():
+            item = get_blocking(raw_queue, loop, stop)
+            if item is None:
+                return
+            if item[:2] == ("raw", FRAME_GENERATED):
+                _, frame_kind, segment, pts, index, face, generation = item
+                with state.pipeline.lock:
+                    if generation != state.pipeline.flush_seq or segment in state.pipeline.canceled_ids:
+                        continue
+                face = pipeline.restore_frame(index, face)
+                item = ("restored", frame_kind, segment, pts, index, face, generation)
+            if not put_blocking(restored_queue, loop, item, stop) or item[0] == "error":
+                return
+    except Exception:
+        put_blocking(restored_queue, loop, ("error", traceback.format_exc()), stop)
+
+
 def live_h264_encode_worker(state, raw_queue, network_queue, loop, stop):
     """Encode in timeline order so inter-frame references stay valid."""
     from .h264 import H264Encoder
@@ -398,7 +419,7 @@ def live_h264_encode_worker(state, raw_queue, network_queue, loop, stop):
                 if kind == "error":
                     return
                 continue
-            if kind != "raw":
+            if kind not in ("raw", "restored"):
                 continue
             _, frame_kind, segment_id, pts_us, frame_index, frame, *generation = item
             with state.pipeline.lock:
@@ -413,6 +434,8 @@ def live_h264_encode_worker(state, raw_queue, network_queue, loop, stop):
                 if image is None:
                     cycle = state.model.avatar.frame_list_cycle
                     image = cycle[frame_index % len(cycle)]
+            elif kind == "restored":
+                image = pipeline.composite_frame(frame_index, frame)
             elif frame_kind == FRAME_GENERATED:
                 image = pipeline.blend_frame(frame_index, frame)
             else:

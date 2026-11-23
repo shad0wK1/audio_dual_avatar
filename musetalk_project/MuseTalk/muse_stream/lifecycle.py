@@ -12,6 +12,21 @@ from .models import build_avatar, build_runtime, warmup
 from .state import AppState
 
 
+def close_restorer(state: AppState) -> None:
+    restorer = getattr(state.model.runtime, "face_restorer", None)
+    close = getattr(restorer, "close", None)
+    if close is not None:
+        close()
+
+
+def shutdown(state: AppState) -> None:
+    """Release the resident worker, including before main's os._exit."""
+    state.service.exit_requested = True
+    state.service.accepting_streams = False
+    state.service.ready = False
+    close_restorer(state)
+
+
 def request_live_exit(state: AppState, reason: str) -> None:
     if state.service.exit_requested:
         return
@@ -36,6 +51,9 @@ def initialize(state: AppState) -> None:
         state.service.status = "loading_models"
         runtime = build_runtime(args)
         state.model.runtime = runtime
+        if state.service.exit_requested:
+            close_restorer(state)
+            return
 
         state.service.status = "loading_avatar"
         state.model.avatar = build_avatar(
@@ -48,6 +66,9 @@ def initialize(state: AppState) -> None:
         import torch
         torch.backends.cudnn.benchmark = False
         warmup(runtime, args)
+        if state.service.exit_requested:
+            close_restorer(state)
+            return
         if state.model.avatar.frame_list_cycle:
             frame = state.model.avatar.frame_list_cycle[0]
             state.model.height, state.model.width = frame.shape[:2]
@@ -76,6 +97,7 @@ def initialize(state: AppState) -> None:
             threading.Thread(target=monitor.run, daemon=True).start()
         log("ready")
     except Exception as exc:  # pragma: no cover - surfaced through /api/status
+        close_restorer(state)
         state.model.avatar_ready = False
         state.model.avatar_switching = False
         state.service.status = "error"

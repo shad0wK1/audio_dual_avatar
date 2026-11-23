@@ -1,0 +1,7 @@
+# Copy to .gpen-env on the server before starting the MuseTalk service.
+# Select a face-restoration backend. GPEN is the default deployed mode.
+export MUSETALK_FACE_RESTORATION="${MUSETALK_FACE_RESTORATION:-gpen}"
+export MUSETALK_GPEN_OPS="${MUSETALK_GPEN_OPS:-native}"
+export MUSETALK_GPEN_WEIGHTS="$(dirname "${BASH_SOURCE[0]}")/musetalk_project/gpen/GPEN-BFR-512.pth"
+# Optional: place GPEN on another visible GPU index, e.g. 1.
+# export MUSETALK_GPEN_CUDA_VISIBLE_DEVICE=1

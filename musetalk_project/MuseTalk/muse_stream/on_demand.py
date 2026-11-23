@@ -5,9 +5,6 @@ import os
 from pathlib import Path
 import socket
 import sys
-import tempfile
-import logging
-import math
 import threading
 import time
 
@@ -20,7 +17,6 @@ from fastapi.responses import JSONResponse, Response
 from .api.app import create_app
 from .api.routes import AvatarSelectRequest, status as native_status
 from .avatar_registry import AvatarError, inspect_avatar_cache, validate_avatar_id
-from .models import cache_dir_for
 from .config import configure_state, load_config
 from .lifecycle import initialize
 from .models import model_paths
@@ -38,15 +34,13 @@ class Renderer:
         self.config = config
         self.state = state
         self.lock = asyncio.Lock()
-        self.child_env = os.environ.copy()
         self.child = None
         self.ready = False
         self.users = 0
-        self.idle_deadline = 0.0
-        self.idle = float(os.getenv("AVATAR_GPU_IDLE_SECONDS", "300"))
-        if not math.isfinite(self.idle) or self.idle <= 0:
-            raise ValueError("AVATAR_GPU_IDLE_SECONDS must be finite and positive")
-        self.warmup_idle = min(60.0, self.idle)
+        self.last_use = 0.0
+        self.idle = float(os.getenv("AVATAR_GPU_IDLE_SECONDS", "60"))
+        if self.idle <= 0:
+            raise ValueError("AVATAR_GPU_IDLE_SECONDS must be positive")
 
     async def stop(self):
         self.ready = False
@@ -62,7 +56,6 @@ class Renderer:
                 child.kill()
                 await child.wait()
         self.child = None
-        self.idle_deadline = 0.0
         self.state.service.status = "standby"
 
     async def reap_idle(self):
@@ -70,7 +63,7 @@ class Renderer:
             await asyncio.sleep(1)
             async with self.lock:
                 if self.child and (self.child.returncode is not None or
-                        (not self.users and time.monotonic() >= self.idle_deadline)):
+                        (not self.users and time.monotonic() - self.last_use >= self.idle)):
                     await self.stop()
 
     async def start(self, avatar):
@@ -89,7 +82,7 @@ class Renderer:
             self.ws = f"ws://127.0.0.1:{port}"
             self.child = await asyncio.create_subprocess_exec(
                 sys.executable, "-m", __spec__.name, self.config, str(sock.fileno()), avatar,
-                pass_fds=(sock.fileno(),), env=self.child_env)
+                pass_fds=(sock.fileno(),))
         self.state.service.status = "loading_models"
         try:
             deadline = time.monotonic() + 145
@@ -112,7 +105,7 @@ class Renderer:
             raise
 
     @asynccontextmanager
-    async def hold(self, avatar=None, *, warmup=False):
+    async def hold(self, avatar=None):
         async with self.lock:
             target = validate_avatar_id(avatar or self.state.model.avatar_id)
             if self.child and self.child.returncode is not None:
@@ -130,9 +123,7 @@ class Renderer:
             yield
         finally:
             self.users -= 1
-            timeout = self.warmup_idle if warmup else self.idle
-            # A page warmup must not shorten a previous conversation's grace period.
-            self.idle_deadline = max(self.idle_deadline, time.monotonic() + timeout)
+            self.last_use = time.monotonic()
 
 
 def control_app(path, state):
@@ -145,32 +136,9 @@ def control_app(path, state):
     async def lifespan(app):
         async with httpx.AsyncClient(trust_env=False, timeout=120) as render.client:
             monitor = asyncio.create_task(render.reap_idle())
-            folder = None
-            preload = None
-            stop = threading.Event()
             try:
-                catalog = os.getenv("AVATAR_SYSTEM_PRESETS")
-                if catalog and Path("/dev/shm").is_dir():
-                    import yaml
-                    from .frame_cache import prepare
-                    try:
-                        entries = yaml.safe_load(Path(catalog).read_text())["presets"]
-                        ids = [validate_avatar_id(p["avatar_id"]) for p in entries.values()
-                               if p.get("enabled", True) and p.get("source", "system") == "system"]
-                        folder = tempfile.TemporaryDirectory(prefix="avatar-frames-", dir="/dev/shm")
-                        render.child_env["AVATAR_DECODED_CACHE"] = folder.name
-                        root = cache_dir_for(state.model.avatar_id, state.args.version).parent
-                        preload = asyncio.create_task(asyncio.to_thread(
-                            prepare, Path(folder.name), root, ids, stop))
-                    except (OSError, ValueError, KeyError) as exc:
-                        logging.getLogger("uvicorn.error").warning("frame preload unavailable: %s", exc)
                 yield
             finally:
-                stop.set()
-                if preload is not None:
-                    await asyncio.gather(preload, return_exceptions=True)
-                if folder is not None:
-                    folder.cleanup()
                 monitor.cancel()
                 await asyncio.gather(monitor, return_exceptions=True)
                 await render.stop()
@@ -183,25 +151,12 @@ def control_app(path, state):
             return await next_handler(request)
         def render_status(data):
             return JSONResponse(dict(data, gpu_resident=render.ready,
-                                     gpu_idle_seconds=render.idle, gpu_warmup_idle_seconds=render.warmup_idle,
-                                     active_render_leases=render.users))
+                                     gpu_idle_seconds=render.idle, active_render_leases=render.users))
 
         if path == "/api/status" and not render.ready:
             return render_status(await native_status(request))
         if not render.ready and path in ("/api/avatars", "/api/avatar"):
             return await next_handler(request)
-        if path == "/api/avatar/select" and request.method == "POST" and request.query_params.get("warmup") == "1":
-            selection = AvatarSelectRequest(**(await request.json() or {}))
-            target = validate_avatar_id(selection.avatar_id or state.model.default_avatar_id)
-            if render.users:
-                return JSONResponse({"detail": "Avatar in use"}, status_code=409)
-            try:
-                # A visible page may warm one renderer. It does not reserve a
-                # conversation and only needs a short idle grace period.
-                async with render.hold(target, warmup=True):
-                    pass
-            except (RuntimeError, OSError, httpx.HTTPError) as exc:
-                logging.getLogger("uvicorn.error").warning("optional GPU warmup failed: %s", exc)
         if path == "/api/avatar/select" and state.service.status == "loading_models" and not render.ready:
             return JSONResponse({"detail":"Model is loading"}, status_code=409)
         async with render.lock:
